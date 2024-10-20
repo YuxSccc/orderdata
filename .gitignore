@@ -1,0 +1,8 @@
+footprint_data/*
+raw_data/*
+*.json
+*.csv
+*.txt
+*.log
+*.pyc
+*.pycache
