@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Footprint Chart</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        #chart {
+            width: 100%;
+            height: 100vh;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="chart"></div>
+    <script>
+        fetch('http://127.0.0.1:5000/data')
+            .then(response => response.json())
+            .then(data => {
+                const { bars, signals, config } = data;
+                createFootprintChart(bars, signals, config);
+            });
+
+        function drawSignals(signals, bars, config, traces) {
+            const priceLevelHeight = config.price_level_height;
+            signals.forEach((signal) => {
+                const startBar = bars[signal.startBarIndex];
+                const endBar = bars[signal.endBarIndex];
+                const minPrice = Math.min(...bars.slice(signal.startBarIndex, signal.endBarIndex + 1).flatMap(bar => bar.priceLevels.map(level => level.price)));
+                const maxPrice = Math.max(...bars.slice(signal.startBarIndex, signal.endBarIndex + 1).flatMap(bar => bar.priceLevels.map(level => level.price)));
+
+                let color = signal.color ? signal.color : 'purple';
+                if (!color.startsWith('rgba')) {
+                    const tempDiv = document.createElement('div');
+                    tempDiv.style.color = color;
+                    document.body.appendChild(tempDiv);
+                    const computedColor = getComputedStyle(tempDiv).color;
+                    document.body.removeChild(tempDiv);
+                    const rgbValues = computedColor.match(/\d+/g);
+                    color = `rgba(${rgbValues[0]}, ${rgbValues[1]}, ${rgbValues[2]}, 0.3)`;
+                } else {
+                    color = color.replace(/rgba\((\d+), (\d+), (\d+), [^)]+\)/, 'rgba($1, $2, $3, 0.3)');
+                }
+
+                traces.push({
+                    type: 'scatter',
+                    mode: 'lines',
+                    x: [new Date(startBar.timestamp * 1000 - startBar.duration * 500), new Date(endBar.timestamp * 1000 + endBar.duration * 500), new Date(endBar.timestamp * 1000 + endBar.duration * 500), new Date(startBar.timestamp * 1000 - startBar.duration * 500), new Date(startBar.timestamp * 1000 - startBar.duration * 500)],
+                    y: [minPrice - priceLevelHeight, minPrice - priceLevelHeight, maxPrice + priceLevelHeight, maxPrice + priceLevelHeight, minPrice - priceLevelHeight],
+                    fill: 'toself',
+                    fillcolor: color,
+                    line: { color: color, width: 2 },
+                    hoverinfo: 'skip'
+                });
+
+                // 在框下方标记信号名称和参数数组
+                traces.push({
+                    type: 'scatter',
+                    mode: 'text',
+                    x: [new Date((startBar.timestamp + endBar.timestamp) / 2 * 1000)],
+                    y: [minPrice - priceLevelHeight * 2],
+                    text: `${signal.name}: ${signal.params.join(', ')}`,
+                    textposition: 'bottom center',
+                    textfont: { color: color, size: config.signal_font_size },
+                    hoverinfo: 'skip'
+                });
+            });
+        }
+
+        function drawFootprint(bars, signals, config, traces) {
+            const maxDelta = Math.max(...bars.flatMap(bar => bar.priceLevels.map(level => Math.abs(level.delta)))) * 0.5;
+            const maxVolume = Math.max(...bars.flatMap(bar => bar.priceLevels.map(level => level.volume))) * 0.5;
+            const priceLevelHeight = config.price_level_height;
+            bars.forEach((bar) => {
+                // 绘制 k-bar 的背景填充（浅灰色）
+                traces.push({
+                    type: 'scatter',
+                    mode: 'lines',
+                    x: [new Date(bar.timestamp * 1000 - bar.duration * 500), new Date(bar.timestamp * 1000 + bar.duration * 500), new Date(bar.timestamp * 1000 + bar.duration * 500), new Date(bar.timestamp * 1000 - bar.duration * 500), new Date(bar.timestamp * 1000 - bar.duration * 500)],
+                    y: [bar.low, bar.low, bar.high + priceLevelHeight, bar.high + priceLevelHeight, bar.low],
+                    fill: 'toself',
+                    fillcolor: 'rgba(211, 211, 211, 0.3)',
+                    line: { width: 0 },
+                    hoverinfo: 'skip'
+                });
+
+                // 绘制 open/close 部分，类似传统 k-bar 的实体部分（确保在最上层），边框为黑色
+                traces.push({
+                    type: 'scatter',
+                    mode: 'lines',
+                    x: [new Date(bar.timestamp * 1000 - bar.duration * 500), new Date(bar.timestamp * 1000 + bar.duration * 500), new Date(bar.timestamp * 1000 + bar.duration * 500), new Date(bar.timestamp * 1000 - bar.duration * 500), new Date(bar.timestamp * 1000 - bar.duration * 500)],
+                    y: [Math.min(bar.open, bar.close), Math.min(bar.open, bar.close), Math.max(bar.open, bar.close), Math.max(bar.open, bar.close), Math.min(bar.open, bar.close)],
+                    fill: 'toself',
+                    fillcolor: 'rgba(0, 0, 0, 0)',
+                    line: { color: 'black', width: 2 },
+                    hoverinfo: 'skip'
+                });
+
+                // 为每个 price level 绘制矩阵，并可视化 delta 和 volume
+                bar.priceLevels.forEach((level) => {
+                    const x0_delta = bar.timestamp - bar.duration / 2;
+                    const x1_delta = x0_delta + (Math.abs(level.delta) / maxDelta) * (bar.duration / 2);
+                    const x0_volume = bar.timestamp;
+                    const x1_volume = x0_volume + (level.volume / maxVolume) * (bar.duration / 2);
+                    const y0 = level.price;
+                    const y1 = level.price + priceLevelHeight;
+
+                    // Delta 矩形 (左侧，正数为绿色，负数为红色)
+                    traces.push({
+                        type: 'scatter',
+                        mode: 'lines',
+                        x: [new Date(x0_delta * 1000), new Date(x1_delta * 1000), new Date(x1_delta * 1000), new Date(x0_delta * 1000), new Date(x0_delta * 1000)],
+                        y: [y0, y0, y1, y1, y0],
+                        fill: 'toself',
+                        fillcolor: level.delta > 0 ? 'rgba(0, 255, 0, 0.6)' : 'rgba(255, 0, 0, 0.6)',
+                        line: { width: 0 },
+                        hoverinfo: 'skip'
+                    });
+
+                    // Volume 矩形 (右侧)
+                    traces.push({
+                        type: 'scatter',
+                        mode: 'lines',
+                        x: [new Date(x0_volume * 1000), new Date(x1_volume * 1000), new Date(x1_volume * 1000), new Date(x0_volume * 1000), new Date(x0_volume * 1000)],
+                        y: [y0, y0, y1, y1, y0],
+                        fill: 'toself',
+                        fillcolor: 'rgba(128, 128, 128, 0.6)',
+                        line: { width: 0 },
+                        hoverinfo: 'skip'
+                    });
+
+                    // 绘制文本 (bid_size, ask_size, volume, delta)
+                    if (config.show_price_level_text) {
+                        traces.push({
+                            type: 'scatter',
+                            mode: 'text',
+                            x: [new Date(bar.timestamp * 1000)],
+                            y: [level.price + priceLevelHeight / 2],
+                            text: `${level.bidSize} X ${level.askSize} | ${level.volume}  ${level.delta}`,
+                            textposition: 'middle center',
+                            textfont: { color: 'black', size: config.price_level_font_size },
+                            hoverinfo: 'skip'
+                        });
+                    }
+                });
+            });
+
+            return traces;
+        }
+
+
+        function createFootprintChart(bars, signals, config) {
+            const traces = [];
+            const priceLevelHeight = config.price_level_height;
+
+            drawFootprint(bars, signals, config, traces);
+            drawSignals(signals, bars, config, traces);
+
+            const layout = {
+                showlegend: false,
+                title: 'Interactive Footprint Chart with Price Levels',
+                xaxis: {
+                    title: 'Time',
+                    showspikes: true,
+                    spikemode: 'toaxis',
+                    spikesnap: 'data',
+                    spikedash: 'solid',
+                    spikethickness: 2,
+                    spikecolor: 'blue',
+                    showline: false,
+                    showgrid: false,
+                    ticklabelposition: 'outside top',
+                },
+                yaxis: {
+                    title: 'Price Level',
+                    showspikes: true,
+                    spikemode: 'toaxis',
+                    spikesnap: 'data',
+                    spikedash: 'solid',
+                    spikethickness: 2,
+                    spikecolor: 'blue',
+                    showline: false,
+                    showgrid: false,
+                    ticklabelposition: 'outside right',
+                },
+                hovermode: 'x unified',
+                showspikes: true,
+                spikemode: 'across',
+                spikecolor: 'blue',
+                spikethickness: 2,
+                spikesnap: 'cursor',
+                tickformat: '%H:%M:%S',
+                dragmode: 'pan',
+                autosize: true,
+                height: window.innerHeight
+            };
+
+            Plotly.newPlot('chart', traces, layout, { scrollZoom: true, displayModeBar: false });
+        }
+    </script>
+    <button id="download-btn">Download as Image</button>
+    <script>
+        document.getElementById('download-btn').addEventListener('click', function () {
+            const maxPrice = Math.max(...sampleData.map(bar => bar.high));
+            const minPrice = Math.min(...sampleData.map(bar => bar.low));
+            const numBars = sampleData.length;
+            const height = (maxPrice - minPrice) / priceLevelHeight * 30;
+            const width = numBars * 150;  // 根据 bar 数量调整宽度，确保所有 bar 都在屏幕内
+            Plotly.relayout('chart', {
+                'xaxis.range': [sampleData[0].timestamp * 1000 - sampleData[0].duration * 1000, sampleData[numBars - 1].timestamp * 1000 + sampleData[0].duration * 1000]
+            });
+            Plotly.toImage(document.getElementById('chart'), { format: 'png', height: height, width: width })
+                .then(function (dataUrl) {
+                    const link = document.createElement('a');
+                    link.href = dataUrl;
+                    link.download = 'footprint_chart.png';
+                    link.click();
+                });
+        });
+    </script>
+</body>
+
+</html>
