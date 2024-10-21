@@ -1,7 +1,7 @@
 from common import *
 
 class SLOrdersSignal(BarsSignal):
-    SIGNAL_NAME = "StopLoseOrders"
+    SIGNAL_NAME = "StopLostOrders"
     def __init__(self):
         super().__init__(SLOrdersSignal.SIGNAL_NAME)
 
@@ -27,6 +27,7 @@ class SLOrdersSignalCalculator(BarCalculator):
         self.price_change_ratio_threshold = price_change_ratio_threshold
         self.bar_count_threshold = bar_count_threshold
         self.total_volume_threshold = total_volume_threshold
+
     def calc_signal(self) -> list[Signal]:
         for idx in range(len(self.bars)):
             if idx < self.bar_count_threshold or idx >= len(self.bars) - self.bar_count_threshold:

@@ -40,7 +40,12 @@ class BigTradeSignalCalculator(TickCalculator):
         for interval_start, trades in aggregated_buy_trades.items():
             if trades['size'] >= self.size_threshold:
                 signal = BigTradeSignal()
-                signal.set_tick(Tick(interval_start, trades['min_price'], trades['size'], True))
+                sigTick = Tick()
+                sigTick.timestamp = interval_start
+                sigTick.price = trades['min_price']
+                sigTick.size = trades['size']
+                sigTick.isBuy = True
+                signal.set_tick(sigTick)
                 signal.set_additional_info([trades['trade_count'], trades['size'], trades['max_price'] - trades['min_price']])
                 signal.set_significance(1)
                 signals.append(signal)
@@ -48,7 +53,12 @@ class BigTradeSignalCalculator(TickCalculator):
         for interval_start, trades in aggregated_sell_trades.items():
             if trades['size'] >= self.size_threshold:
                 signal = BigTradeSignal()
-                signal.set_tick(Tick(interval_start, trades['max_price'], trades['size'], False))
+                sigTick = Tick()
+                sigTick.timestamp = interval_start
+                sigTick.price = trades['max_price']
+                sigTick.size = trades['size']
+                sigTick.isBuy = False
+                signal.set_tick(sigTick)
                 signal.set_additional_info([trades['trade_count'], trades['size'], trades['max_price'] - trades['min_price']])
                 signal.set_significance(1)
                 signals.append(signal)

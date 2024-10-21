@@ -210,6 +210,9 @@ class TickSignal(Signal):
     def set_tick(self, tick: Tick):
         self.tick = tick
 
+    def get_color(self):
+        return 'green' if self.tick.isBuy else 'red'
+
 class BarsSignal(Signal):
     def __init__(self, signalName: str):
         super().__init__(signalName)

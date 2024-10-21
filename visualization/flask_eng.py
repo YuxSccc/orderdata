@@ -83,7 +83,8 @@ def get_data():
     end_index = lower_bound(flask_data, endTs, "timestamp") + 1
     
     filtered_data = flask_data[start_index:end_index]
-    filtered_signals = [signal for signal in flask_signals if signal["startTs"] >= startTs and signal["endTs"] <= endTs]
+    filtered_signals = [signal for signal in flask_signals if signal["type"] == "bars" and signal["startTs"] >= startTs and signal["endTs"] <= endTs]
+    filtered_signals += [signal for signal in flask_signals if signal["type"] == "tick" and signal["timestamp"] >= startTs and signal["timestamp"] <= endTs]
 
     return jsonify({"bars": filtered_data, "signals": filtered_signals, "config": config})
 

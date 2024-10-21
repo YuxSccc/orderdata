@@ -89,12 +89,13 @@
             bars.forEach((bar, idx) => {
                 ts_to_idx[bar.timestamp] = idx;
             });
-            signals.forEach((signal) => {
-                const startBar = bars[ts_to_idx[signal.startTs]];
-                const endBar = bars[ts_to_idx[signal.endTs]];
-                const minPrice = Math.min(...bars.slice(ts_to_idx[signal.startTs], ts_to_idx[signal.endTs] + 1).flatMap(bar => bar.priceLevels.map(level => level.price)));
-                const maxPrice = Math.max(...bars.slice(ts_to_idx[signal.startTs], ts_to_idx[signal.endTs] + 1).flatMap(bar => bar.priceLevels.map(level => level.price)));
 
+            tickSignalX = [];
+            tickSignalY = [];
+            tickSignalText = [];
+            tickSignalColor = [];
+
+            signals.forEach((signal) => {
                 let color = signal.color ? signal.color : 'purple';
                 if (!color.startsWith('rgba')) {
                     const tempDiv = document.createElement('div');
@@ -107,28 +108,53 @@
                 } else {
                     color = color.replace(/rgba\((\d+), (\d+), (\d+), [^)]+\)/, 'rgba($1, $2, $3, 0.3)');
                 }
-                traces.push({
-                    type: 'scatter',
-                    mode: 'lines',
-                    x: [startBar.timestamp * 1000 - startBar.duration * 500, endBar.timestamp * 1000 + endBar.duration * 500, endBar.timestamp * 1000 + endBar.duration * 500, startBar.timestamp * 1000 - startBar.duration * 500, startBar.timestamp * 1000 - startBar.duration * 500],
-                    y: [minPrice - priceLevelHeight, minPrice - priceLevelHeight, maxPrice + priceLevelHeight, maxPrice + priceLevelHeight, minPrice - priceLevelHeight],
-                    fill: 'toself',
-                    fillcolor: color,
-                    line: { color: color, width: 2 },
-                    hoverinfo: 'skip'
-                });
+                if (signal.type === 'bars') {
+                    const startBar = bars[ts_to_idx[signal.startTs]];
+                    const endBar = bars[ts_to_idx[signal.endTs]];
+                    const minPrice = Math.min(...bars.slice(ts_to_idx[signal.startTs], ts_to_idx[signal.endTs] + 1).flatMap(bar => bar.priceLevels.map(level => level.price)));
+                    const maxPrice = Math.max(...bars.slice(ts_to_idx[signal.startTs], ts_to_idx[signal.endTs] + 1).flatMap(bar => bar.priceLevels.map(level => level.price)));
+                    traces.push({
+                        type: 'scatter',
+                        mode: 'lines',
+                        x: [startBar.timestamp * 1000 - startBar.duration * 500, endBar.timestamp * 1000 + endBar.duration * 500, endBar.timestamp * 1000 + endBar.duration * 500, startBar.timestamp * 1000 - startBar.duration * 500, startBar.timestamp * 1000 - startBar.duration * 500],
+                        y: [minPrice - priceLevelHeight, minPrice - priceLevelHeight, maxPrice + priceLevelHeight, maxPrice + priceLevelHeight, minPrice - priceLevelHeight],
+                        fill: 'toself',
+                        fillcolor: color,
+                        line: { color: color, width: 2 },
+                        hoverinfo: 'skip'
+                    });
 
-                // 在框下方标记信号名称和参数数组
-                traces.push({
-                    type: 'scatter',
-                    mode: 'text',
-                    x: [(startBar.timestamp + endBar.timestamp) / 2 * 1000],
-                    y: [minPrice - priceLevelHeight * 2],
-                    text: `${signal.name}: ${signal.params.join(', ')}`,
-                    textposition: 'bottom center',
-                    textfont: { color: color, size: config.signal_font_size },
-                    hoverinfo: 'skip'
-                });
+                    // 在框下方标记信号名称和参数数组
+                    traces.push({
+                        type: 'scatter',
+                        mode: 'text',
+                        x: [(startBar.timestamp + endBar.timestamp) / 2 * 1000],
+                        y: [minPrice - priceLevelHeight * 2],
+                        text: `${signal.name}: ${signal.params.join(', ')}`,
+                        textposition: 'bottom center',
+                        textfont: { color: color, size: config.signal_font_size },
+                        hoverinfo: 'skip'
+                    });
+                } else if (signal.type === 'tick') {
+                    tickSignalX.push(new Date(signal.timestamp * 1000));
+                    tickSignalY.push(signal.price);
+                    tickSignalText.push(`${signal.name}: ${signal.params.join(', ')}`);
+                    tickSignalColor.push(color);
+                }
+            });
+            traces.push({
+                type: 'scatter',
+                mode: 'markers',
+                x: tickSignalX,
+                y: tickSignalY,
+                marker: {
+                    symbol: 'circle',
+                    size: 40,
+                    color: tickSignalColor
+                },
+                hoverinfo: 'text',
+                text: tickSignalText,
+                textposition: 'bottom center',
             });
         }
 
@@ -287,6 +313,7 @@
                 title: 'Interactive Footprint Chart with Price Levels',
                 xaxis: {
                     title: 'Time',
+                    autorange: true,
                     type: 'date',
                     showspikes: true,
                     spikemode: 'toaxis',
@@ -300,6 +327,7 @@
                 },
                 yaxis: {
                     title: 'Price Level',
+                    autorange: true,
                     showspikes: true,
                     spikemode: 'toaxis',
                     spikesnap: 'data',
@@ -321,7 +349,7 @@
                 autosize: true,
                 height: window.innerHeight
             };
-            Plotly.react('chart', traces, layout, { scrollZoom: true, displayModeBar: false });
+            Plotly.react('chart', traces, layout, { scrollZoom: true, displayModeBar: true, modeBarButtonsToAdd: ['zoom2d', 'pan2d', 'resetScale2d'] });
             if (xRange[0] !== null && xRange[1] !== null && yRange[0] !== null && yRange[1] !== null) {
                 Plotly.relayout('chart', {
                     'xaxis.range[0]': xRange[0],
