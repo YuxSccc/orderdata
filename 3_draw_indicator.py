@@ -2,11 +2,9 @@ import json
 from visualization.flask_eng import start_server, set_data
 from common import *
 import pandas as pd
-from indicator.SL_orders import SLOrdersSignalCalculator
-from indicator.big_trade import BigTradeSignalCalculator
-from indicator.trade_imbalance import TradeImbalanceSignalCalculator
+from indicator import *
 
-filename = 'BTCUSDT-trades-2024-09'
+filename = 'BTCUSDT-trades-2024-10-01'
 
 def get_bars(filename: str) -> list[FootprintBar]:
     with open(filename, 'r') as f:
@@ -83,10 +81,12 @@ def encode_signals(bars: list[FootprintBar], signals: list[Signal]):
 def draw_indicator(bars: list[FootprintBar]) -> list[Signal]:
     SL_orders_calculator = SLOrdersSignalCalculator(bars, 30, 3, 50/60000, 70)
     SL_orders_calculator.calc_signal()
-    # ticks = get_ticks(f'./agg_trade/{filename}.csv')
-    # big_trade_calculator = BigTradeSignalCalculator(ticks, 200, 200)
-    # big_trade_calculator.calc_signal()
-    return SL_orders_calculator.signals
+    ticks = get_ticks(f'./agg_trade/{filename}.csv')
+    big_trade_calculator = BigTradeSignalCalculator(ticks, 200, 200)
+    big_trade_calculator.calc_signal()
+    trade_imbalance_calculator = TradeImbalanceSignalCalculator(bars, 5, 4, 50, 0.5)
+    trade_imbalance_calculator.calc_signal()
+    return SL_orders_calculator.signals + big_trade_calculator.signals + trade_imbalance_calculator.signals
 
 if __name__ == "__main__":
     bars = get_bars(f'./footprint/{filename}.json')

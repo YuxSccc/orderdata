@@ -124,7 +124,6 @@
                         hoverinfo: 'skip'
                     });
 
-                    // 在框下方标记信号名称和参数数组
                     traces.push({
                         type: 'scatter',
                         mode: 'text',
@@ -135,6 +134,22 @@
                         textfont: { color: color, size: config.signal_font_size },
                         hoverinfo: 'skip'
                     });
+
+                    traces.push({
+                        type: 'scatter',
+                        mode: 'markers',
+                        x: [(startBar.timestamp + endBar.timestamp) / 2 * 1000],
+                        y: [minPrice - priceLevelHeight * 2],
+                        marker: {
+                            symbol: 'diamond',
+                            size: 20,
+                            color: color
+                        },
+                        hoverinfo: 'text',
+                        text: `${signal.name}: ${signal.params.join(', ')}`,
+                        textposition: 'bottom center',
+                    });
+
                 } else if (signal.type === 'tick') {
                     tickSignalX.push(new Date(signal.timestamp * 1000));
                     tickSignalY.push(signal.price);
@@ -258,7 +273,6 @@
                 hoverinfo: 'skip'
             });
 
-            // Volume 矩形 (右侧)
             traces.push({
                 name: 'volume',
                 type: 'scatter',
@@ -315,35 +329,20 @@
                     title: 'Time',
                     autorange: true,
                     type: 'date',
-                    showspikes: true,
-                    spikemode: 'toaxis',
-                    spikesnap: 'data',
-                    spikedash: 'solid',
-                    spikethickness: 2,
-                    spikecolor: 'blue',
                     showline: true,
-                    showgrid: true,
+                    showgrid: false,
                     ticklabelposition: 'outside top',
                 },
                 yaxis: {
                     title: 'Price Level',
                     autorange: true,
-                    showspikes: true,
-                    spikemode: 'toaxis',
-                    spikesnap: 'data',
-                    spikedash: 'solid',
-                    spikethickness: 2,
-                    spikecolor: 'blue',
+                    tickformat: ',d',
                     showline: true,
-                    showgrid: true,
+                    showgrid: false,
                     ticklabelposition: 'outside right',
                 },
                 hovermode: 'x unified',
-                showspikes: true,
-                spikemode: 'across',
-                spikecolor: 'blue',
-                spikethickness: 2,
-                spikesnap: 'cursor',
+                showspikes: false,
                 tickformat: '%H:%M:%S',
                 dragmode: 'pan',
                 autosize: true,
