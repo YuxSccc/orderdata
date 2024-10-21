@@ -68,8 +68,6 @@ class FootprintBar:
         self.volumePrecision : int = volumePrecision
         self.pricePrecision : int = pricePrecision
 
-
-
     def __eq__(self, other):
         return self.timestamp == other.timestamp and self.duration == other.duration and self.scale == other.scale and self.volumePrecision == other.volumePrecision and self.pricePrecision == other.pricePrecision
 
@@ -229,6 +227,9 @@ class BarsSignal(Signal):
 
     def get_bars(self) -> list[FootprintBar]:
         return self.kBarList
+    
+    def get_timestamp(self) -> tuple[int, int]:
+        return self.kBarList[0].timestamp, self.kBarList[-1].timestamp
 
 class Calculator(ABC):
     pass

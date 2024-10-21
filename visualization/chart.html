@@ -17,20 +17,83 @@
 <body>
     <div id="chart"></div>
     <script>
-        fetch('http://127.0.0.1:5000/data')
-            .then(response => response.json())
-            .then(data => {
-                const { bars, signals, config } = data;
-                createFootprintChart(bars, signals, config);
+        let currentRange = { start: 0, end: 0 };
+        let tsRange = { start: 0, end: 0 };
+        let barInterval = 0;
+        const InitBarCount = 50;
+        const BufferBarCount = 500;
+        const TriggerBarCount = 350;
+        let minPrice = 0;
+        let maxPrice = 0;
+        let relayout_mutex = false;
+        let layoutRange = { x: [null, null], y: [null, null] };
+
+        function registerReLayoutEvent() {
+            document.getElementById('chart').on('plotly_relayout', debounce(async function (eventData) {
+                const xRange = [eventData["xaxis.range[0]"], eventData["xaxis.range[1]"]];
+                if (xRange && !relayout_mutex) {
+                    relayout_mutex = true;
+                    const yRange = [eventData["yaxis.range[0]"], eventData["yaxis.range[1]"]];
+                    if (typeof xRange[0] === 'string') {
+                        xRange[0] = new Date(xRange[0]).getTime();
+                    }
+                    if (typeof xRange[1] === 'string') {
+                        xRange[1] = new Date(xRange[1]).getTime();
+                    }
+                    layoutRange.x = xRange;
+                    layoutRange.y = yRange;
+                    const newStart = Math.floor(xRange[0] / 1000 / barInterval) * barInterval;
+                    const newEnd = Math.ceil(xRange[1] / 1000 / barInterval) * barInterval;
+                    if (newStart < currentRange.start + TriggerBarCount * barInterval || newEnd > currentRange.end - TriggerBarCount * barInterval) {
+                        await updateChart(newStart - BufferBarCount * barInterval, newEnd + BufferBarCount * barInterval, xRange, yRange);
+                    }
+                    relayout_mutex = false;
+                }
+            }, 300));
+        }
+
+        async function init() {
+            await getRange()
+            await updateChart(tsRange.start, tsRange.start + (InitBarCount + BufferBarCount) * barInterval);
+            Plotly.relayout('chart', {
+                'xaxis.range[0]': currentRange.start * 1000,
+                'xaxis.range[1]': (currentRange.start + InitBarCount * barInterval) * 1000,
+                'yaxis.range[0]': minPrice,
+                'yaxis.range[1]': maxPrice
             });
+            registerReLayoutEvent();
+        }
+
+        async function getRange() {
+            return fetch('http://127.0.0.1:5000/range')
+                .then(response => response.json())
+                .then(data => {
+                    tsRange.start = data.start;
+                    tsRange.end = data.end;
+                    barInterval = data.barInterval;
+                });
+        }
+
+        async function updateChart(startTs, endTs, xRange = [null, null], yRange = [null, null]) {
+            const response = await fetch(`http://127.0.0.1:5000/data?startTs=${startTs}&endTs=${endTs}`)
+            const data = await response.json()
+            const { bars, signals, config } = data;
+            minPrice = Math.min(...bars.flatMap(bar => bar.low));
+            maxPrice = Math.max(...bars.flatMap(bar => bar.high));
+            await renderChart(bars, signals, config, startTs, endTs, xRange, yRange);
+        }
 
         function drawSignals(signals, bars, config, traces) {
             const priceLevelHeight = config.price_level_height;
+            ts_to_idx = {};
+            bars.forEach((bar, idx) => {
+                ts_to_idx[bar.timestamp] = idx;
+            });
             signals.forEach((signal) => {
-                const startBar = bars[signal.startBarIndex];
-                const endBar = bars[signal.endBarIndex];
-                const minPrice = Math.min(...bars.slice(signal.startBarIndex, signal.endBarIndex + 1).flatMap(bar => bar.priceLevels.map(level => level.price)));
-                const maxPrice = Math.max(...bars.slice(signal.startBarIndex, signal.endBarIndex + 1).flatMap(bar => bar.priceLevels.map(level => level.price)));
+                const startBar = bars[ts_to_idx[signal.startTs]];
+                const endBar = bars[ts_to_idx[signal.endTs]];
+                const minPrice = Math.min(...bars.slice(ts_to_idx[signal.startTs], ts_to_idx[signal.endTs] + 1).flatMap(bar => bar.priceLevels.map(level => level.price)));
+                const maxPrice = Math.max(...bars.slice(ts_to_idx[signal.startTs], ts_to_idx[signal.endTs] + 1).flatMap(bar => bar.priceLevels.map(level => level.price)));
 
                 let color = signal.color ? signal.color : 'purple';
                 if (!color.startsWith('rgba')) {
@@ -44,11 +107,10 @@
                 } else {
                     color = color.replace(/rgba\((\d+), (\d+), (\d+), [^)]+\)/, 'rgba($1, $2, $3, 0.3)');
                 }
-
                 traces.push({
                     type: 'scatter',
                     mode: 'lines',
-                    x: [new Date(startBar.timestamp * 1000 - startBar.duration * 500), new Date(endBar.timestamp * 1000 + endBar.duration * 500), new Date(endBar.timestamp * 1000 + endBar.duration * 500), new Date(startBar.timestamp * 1000 - startBar.duration * 500), new Date(startBar.timestamp * 1000 - startBar.duration * 500)],
+                    x: [startBar.timestamp * 1000 - startBar.duration * 500, endBar.timestamp * 1000 + endBar.duration * 500, endBar.timestamp * 1000 + endBar.duration * 500, startBar.timestamp * 1000 - startBar.duration * 500, startBar.timestamp * 1000 - startBar.duration * 500],
                     y: [minPrice - priceLevelHeight, minPrice - priceLevelHeight, maxPrice + priceLevelHeight, maxPrice + priceLevelHeight, minPrice - priceLevelHeight],
                     fill: 'toself',
                     fillcolor: color,
@@ -60,7 +122,7 @@
                 traces.push({
                     type: 'scatter',
                     mode: 'text',
-                    x: [new Date((startBar.timestamp + endBar.timestamp) / 2 * 1000)],
+                    x: [(startBar.timestamp + endBar.timestamp) / 2 * 1000],
                     y: [minPrice - priceLevelHeight * 2],
                     text: `${signal.name}: ${signal.params.join(', ')}`,
                     textposition: 'bottom center',
@@ -74,86 +136,147 @@
             const maxDelta = Math.max(...bars.flatMap(bar => bar.priceLevels.map(level => Math.abs(level.delta)))) * 0.5;
             const maxVolume = Math.max(...bars.flatMap(bar => bar.priceLevels.map(level => level.volume))) * 0.5;
             const priceLevelHeight = config.price_level_height;
-            bars.forEach((bar) => {
-                // 绘制 k-bar 的背景填充（浅灰色）
-                traces.push({
-                    type: 'scatter',
-                    mode: 'lines',
-                    x: [new Date(bar.timestamp * 1000 - bar.duration * 500), new Date(bar.timestamp * 1000 + bar.duration * 500), new Date(bar.timestamp * 1000 + bar.duration * 500), new Date(bar.timestamp * 1000 - bar.duration * 500), new Date(bar.timestamp * 1000 - bar.duration * 500)],
-                    y: [bar.low, bar.low, bar.high + priceLevelHeight, bar.high + priceLevelHeight, bar.low],
-                    fill: 'toself',
-                    fillcolor: 'rgba(211, 211, 211, 0.3)',
-                    line: { width: 0 },
-                    hoverinfo: 'skip'
-                });
 
-                // 绘制 open/close 部分，类似传统 k-bar 的实体部分（确保在最上层），边框为黑色
-                traces.push({
-                    type: 'scatter',
-                    mode: 'lines',
-                    x: [new Date(bar.timestamp * 1000 - bar.duration * 500), new Date(bar.timestamp * 1000 + bar.duration * 500), new Date(bar.timestamp * 1000 + bar.duration * 500), new Date(bar.timestamp * 1000 - bar.duration * 500), new Date(bar.timestamp * 1000 - bar.duration * 500)],
-                    y: [Math.min(bar.open, bar.close), Math.min(bar.open, bar.close), Math.max(bar.open, bar.close), Math.max(bar.open, bar.close), Math.min(bar.open, bar.close)],
-                    fill: 'toself',
-                    fillcolor: 'rgba(0, 0, 0, 0)',
-                    line: { color: 'black', width: 2 },
-                    hoverinfo: 'skip'
-                });
+            const kBarX = [];
+            const kBarY = [];
+            const kBarOpenCloseX = [];
+            const kBarOpenCloseY = [];
+            const positivePriceLevelX = [];
+            const negativePriceLevelX = [];
+            const positivePriceLevelY = [];
+            const negativePriceLevelY = [];
+            const volumeX = [];
+            const volumeY = [];
+            const PriceLevelTextX = [];
+            const PriceLevelTextY = [];
+            const PriceLevelText = [];
+
+            bars.forEach((bar) => {
+                kBarX.push(bar.timestamp * 1000 - bar.duration * 500, bar.timestamp * 1000 + bar.duration * 500, bar.timestamp * 1000 + bar.duration * 500, bar.timestamp * 1000 - bar.duration * 500, bar.timestamp * 1000 - bar.duration * 500, null);
+                kBarY.push(bar.low, bar.low, bar.high + priceLevelHeight, bar.high + priceLevelHeight, bar.low, null);
+                kBarOpenCloseX.push(bar.timestamp * 1000 - bar.duration * 500, bar.timestamp * 1000 + bar.duration * 500, bar.timestamp * 1000 + bar.duration * 500, bar.timestamp * 1000 - bar.duration * 500, bar.timestamp * 1000 - bar.duration * 500, null);
+                kBarOpenCloseY.push(Math.min(bar.open, bar.close), Math.min(bar.open, bar.close), Math.max(bar.open, bar.close), Math.max(bar.open, bar.close), Math.min(bar.open, bar.close), null);
 
                 // 为每个 price level 绘制矩阵，并可视化 delta 和 volume
                 bar.priceLevels.forEach((level) => {
                     const x0_delta = bar.timestamp - bar.duration / 2;
-                    const x1_delta = x0_delta + (Math.abs(level.delta) / maxDelta) * (bar.duration / 2);
+                    const x1_delta = x0_delta + Math.min(1, (Math.abs(level.delta) / maxDelta)) * (bar.duration / 2);
                     const x0_volume = bar.timestamp;
-                    const x1_volume = x0_volume + (level.volume / maxVolume) * (bar.duration / 2);
+                    const x1_volume = x0_volume + Math.min(1, (level.volume / maxVolume)) * (bar.duration / 2);
                     const y0 = level.price;
                     const y1 = level.price + priceLevelHeight;
 
-                    // Delta 矩形 (左侧，正数为绿色，负数为红色)
-                    traces.push({
-                        type: 'scatter',
-                        mode: 'lines',
-                        x: [new Date(x0_delta * 1000), new Date(x1_delta * 1000), new Date(x1_delta * 1000), new Date(x0_delta * 1000), new Date(x0_delta * 1000)],
-                        y: [y0, y0, y1, y1, y0],
-                        fill: 'toself',
-                        fillcolor: level.delta > 0 ? 'rgba(0, 255, 0, 0.6)' : 'rgba(255, 0, 0, 0.6)',
-                        line: { width: 0 },
-                        hoverinfo: 'skip'
-                    });
-
-                    // Volume 矩形 (右侧)
-                    traces.push({
-                        type: 'scatter',
-                        mode: 'lines',
-                        x: [new Date(x0_volume * 1000), new Date(x1_volume * 1000), new Date(x1_volume * 1000), new Date(x0_volume * 1000), new Date(x0_volume * 1000)],
-                        y: [y0, y0, y1, y1, y0],
-                        fill: 'toself',
-                        fillcolor: 'rgba(128, 128, 128, 0.6)',
-                        line: { width: 0 },
-                        hoverinfo: 'skip'
-                    });
-
-                    // 绘制文本 (bid_size, ask_size, volume, delta)
-                    if (config.show_price_level_text) {
-                        traces.push({
-                            type: 'scatter',
-                            mode: 'text',
-                            x: [new Date(bar.timestamp * 1000)],
-                            y: [level.price + priceLevelHeight / 2],
-                            text: `${level.bidSize} X ${level.askSize} | ${level.volume}  ${level.delta}`,
-                            textposition: 'middle center',
-                            textfont: { color: 'black', size: config.price_level_font_size },
-                            hoverinfo: 'skip'
-                        });
+                    if (level.delta > 0) {
+                        positivePriceLevelX.push(x0_delta * 1000, x1_delta * 1000, x1_delta * 1000, x0_delta * 1000, x0_delta * 1000, null);
+                        positivePriceLevelY.push(y0, y0, y1, y1, y0, null);
+                    } else {
+                        negativePriceLevelX.push(x0_delta * 1000, x1_delta * 1000, x1_delta * 1000, x0_delta * 1000, x0_delta * 1000, null);
+                        negativePriceLevelY.push(y0, y0, y1, y1, y0, null);
                     }
+                    PriceLevelTextX.push(bar.timestamp * 1000, null);
+                    PriceLevelTextY.push(level.price + priceLevelHeight / 2, null);
+                    PriceLevelText.push(`${level.bidSize} X ${level.askSize} | ${level.volume}  ${level.delta}`, null);
+                    volumeX.push(x0_volume * 1000, x1_volume * 1000, x1_volume * 1000, x0_volume * 1000, x0_volume * 1000, null);
+                    volumeY.push(y0, y0, y1, y1, y0, null);
                 });
             });
 
+            // 绘制 k-bar 的背景填充（浅灰色）
+            traces.push({
+                name: 'k_bar',
+                type: 'scatter',
+                mode: 'lines',
+                x: kBarX,
+                y: kBarY,
+                fill: 'toself',
+                fillcolor: 'rgba(211, 211, 211, 0.3)',
+                line: { width: 0 },
+                hoverinfo: 'skip'
+            });
+
+            // 绘制 open/close 部分，类似传统 k-bar 的实体部分（确保在最上层），边框为黑色
+            traces.push({
+                name: 'k_bar_open_close',
+                type: 'scatter',
+                mode: 'lines',
+                x: kBarOpenCloseX,
+                y: kBarOpenCloseY,
+                fill: 'toself',
+                fillcolor: 'rgba(0, 0, 0, 0)',
+                line: { color: 'black', width: 2 },
+                hoverinfo: 'skip'
+            });
+
+            // Delta 矩形 (左侧，正数为绿色，负数为红色)
+            traces.push({
+                name: 'positive_price_level',
+                type: 'scatter',
+                mode: 'lines',
+                x: positivePriceLevelX,
+                y: positivePriceLevelY,
+                fill: 'toself',
+                fillcolor: 'rgba(0, 255, 0, 0.6)',
+                line: { width: 0 },
+                hoverinfo: 'skip'
+            });
+
+            traces.push({
+                name: 'negative_price_level',
+                type: 'scatter',
+                mode: 'lines',
+                x: negativePriceLevelX,
+                y: negativePriceLevelY,
+                fill: 'toself',
+                fillcolor: 'rgba(255, 0, 0, 0.6)',
+                line: { width: 0 },
+                hoverinfo: 'skip'
+            });
+
+            // Volume 矩形 (右侧)
+            traces.push({
+                name: 'volume',
+                type: 'scatter',
+                mode: 'lines',
+                x: volumeX,
+                y: volumeY,
+                fill: 'toself',
+                fillcolor: 'rgba(128, 128, 128, 0.6)',
+                line: { width: 0 },
+                hoverinfo: 'skip'
+            });
+
+            // 绘制文本 (bid_size, ask_size, volume, delta)
+            if (config.show_price_level_text) {
+                traces.push({
+                    name: 'price_level_text',
+                    type: 'scatter',
+                    mode: 'text',
+                    x: PriceLevelTextX,
+                    y: PriceLevelTextY,
+                    text: PriceLevelText,
+                    textposition: 'middle center',
+                    textfont: { color: 'black', size: config.price_level_font_size },
+                    hoverinfo: 'skip'
+                });
+            }
             return traces;
         }
 
+        function debounce(func, delay) {
+            let timeout;
+            return function () {
+                const context = this;
+                const args = arguments;
+                clearTimeout(timeout);
+                timeout = setTimeout(() => func.apply(context, args), delay);
+            };
+        }
 
-        function createFootprintChart(bars, signals, config) {
+        async function renderChart(bars, signals, config, startTs, endTs, xRange, yRange) {
             const traces = [];
+            Plotly.purge('chart');
+            currentRange = { start: startTs, end: endTs };
+
             const priceLevelHeight = config.price_level_height;
 
             drawFootprint(bars, signals, config, traces);
@@ -164,14 +287,15 @@
                 title: 'Interactive Footprint Chart with Price Levels',
                 xaxis: {
                     title: 'Time',
+                    type: 'date',
                     showspikes: true,
                     spikemode: 'toaxis',
                     spikesnap: 'data',
                     spikedash: 'solid',
                     spikethickness: 2,
                     spikecolor: 'blue',
-                    showline: false,
-                    showgrid: false,
+                    showline: true,
+                    showgrid: true,
                     ticklabelposition: 'outside top',
                 },
                 yaxis: {
@@ -182,8 +306,8 @@
                     spikedash: 'solid',
                     spikethickness: 2,
                     spikecolor: 'blue',
-                    showline: false,
-                    showgrid: false,
+                    showline: true,
+                    showgrid: true,
                     ticklabelposition: 'outside right',
                 },
                 hovermode: 'x unified',
@@ -197,9 +321,19 @@
                 autosize: true,
                 height: window.innerHeight
             };
-
-            Plotly.newPlot('chart', traces, layout, { scrollZoom: true, displayModeBar: false });
+            Plotly.react('chart', traces, layout, { scrollZoom: true, displayModeBar: false });
+            if (xRange[0] !== null && xRange[1] !== null && yRange[0] !== null && yRange[1] !== null) {
+                Plotly.relayout('chart', {
+                    'xaxis.range[0]': xRange[0],
+                    'xaxis.range[1]': xRange[1],
+                    'yaxis.range[0]': yRange[0],
+                    'yaxis.range[1]': yRange[1]
+                });
+            }
+            registerReLayoutEvent();
         }
+        let isShiftPressed = false;
+        init();
     </script>
     <button id="download-btn">Download as Image</button>
     <script>

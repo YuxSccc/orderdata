@@ -15,7 +15,7 @@ def encode_bars(bars: list[FootprintBar]) -> list[dict]:
         price_levels = []
         for price_level in bar.priceLevels.values():
             price_levels.append({
-                "price": price_level.price,
+                "price": bars[0].normalize_price(price_level.price),
                 "bidSize": price_level.bidSize,
                 "askSize": price_level.askSize,
                 "volume": price_level.volume,
@@ -25,10 +25,10 @@ def encode_bars(bars: list[FootprintBar]) -> list[dict]:
         res.append({
             "timestamp": bar.timestamp,
             "duration": bar.duration,
-            "open": bar.open,
-            "close": bar.close,
-            "high": bar.high,
-            "low": bar.low,
+            "open": bars[0].normalize_price(bar.open),
+            "close": bars[0].normalize_price(bar.close),
+            "high": bars[0].normalize_price(bar.high),
+            "low": bars[0].normalize_price(bar.low),
             "priceLevels": price_levels
         })
     return res
@@ -38,24 +38,38 @@ def encode_signals(bars: list[FootprintBar], signals: list[Signal]):
     for idx in range(len(bars)):
         ts_to_idx[bars[idx].timestamp] = idx
     res = []
+    bar_duration = bars[0].duration
     for signal in signals:
-        assert sorted(signal.get_bars(), key=lambda x: x.timestamp) == signal.get_bars()
-        res.append({
-            "name": signal.get_signal_name(),
-            "startBarIndex": ts_to_idx[signal.get_bars()[0].timestamp],
-            "endBarIndex": ts_to_idx[signal.get_bars()[-1].timestamp],
-            "params": signal.get_additional_info(),
-            "color": "green"
-        })
+        if isinstance(signal, BarsSignal):
+            assert sorted(signal.get_bars(), key=lambda x: x.timestamp) == signal.get_bars()
+            res.append({
+                "name": signal.get_signal_name(),
+                "startTs": signal.get_bars()[0].timestamp,
+                "endTs": signal.get_bars()[-1].timestamp,
+                "params": signal.get_additional_info(),
+                "type": "bars",
+                "color": "purple"
+            })
+        elif isinstance(signal, TickSignal):
+            res.append({
+                "name": signal.get_signal_name(),
+                "timestamp": signal.tick.timestamp // bar_duration * bar_duration,
+                "price": bars[0].normalize_price(signal.tick.price),
+                "params": signal.get_additional_info(),
+                "type": "tick",
+                "color": "green"
+            })
+        else:
+            raise ValueError(f"Unknown signal type: {type(signal)}")
     return res
 
 def draw_indicator(bars: list[FootprintBar]) -> list[Signal]:
-    calculator = SLOrdersSignalCalculator(bars, 30, 3, 50/60000)
+    calculator = SLOrdersSignalCalculator(bars, 30, 3, 50/60000, 70)
     calculator.calc_signal()
     return calculator.signals
 
 if __name__ == "__main__":
-    bars = get_bars('./footprint/BTCUSDT-trades-2024-10-01.json')
+    bars = get_bars('./footprint/BTCUSDT-trades-2024-09.json')
     signals = draw_indicator(bars)
-    set_data(encode_bars(bars), encode_signals(bars, signals), {"price_level_height": (10 ** -bars[0].pricePrecision) * bars[0].scale})
+    set_data(encode_bars(bars), encode_signals(bars, signals), {"show_price_level_text": False, "price_level_height": (10 ** -bars[0].pricePrecision) * bars[0].scale})
     start_server()

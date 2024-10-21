@@ -1,6 +1,7 @@
 from flask import Flask, jsonify
 from flask_cors import CORS
 from typing import List, Dict
+from flask import request
 import time
 import random
 
@@ -52,6 +53,8 @@ def set_data(data: list[dict], signals: list[dict], config: dict):
 
 @app.route('/data', methods=['GET'])
 def get_data():
+    startTs = int(request.args.get('startTs', 0))
+    endTs = int(request.args.get('endTs', 1000))
     global flask_data, flask_signals, flask_config
     config = {
         "signal_font_size": 14 if "signal_font_size" not in flask_config else flask_config["signal_font_size"],
@@ -59,8 +62,41 @@ def get_data():
         "price_level_height": 1 if "price_level_height" not in flask_config else flask_config["price_level_height"],
         "show_price_level_text": False if "show_price_level_text" not in flask_config else flask_config["show_price_level_text"]
     }
-    return jsonify({"bars": flask_data, "signals": flask_signals, "config": config})
 
+    def lower_bound(data, target, key):
+        left, right = 0, len(data)
+        if len(data) < 100:
+            for i in range(len(data)):
+                if data[i][key] >= target:
+                    return i
+            return len(data)
+
+        while left < right:
+            mid = (left + right) // 2
+            if data[mid][key] < target:
+                left = mid + 1
+            else:
+                right = mid
+        return left
+
+    start_index = lower_bound(flask_data, startTs, "timestamp")
+    end_index = lower_bound(flask_data, endTs, "timestamp") + 1
+    
+    filtered_data = flask_data[start_index:end_index]
+    filtered_signals = [signal for signal in flask_signals if signal["startTs"] >= startTs and signal["endTs"] <= endTs]
+
+    return jsonify({"bars": filtered_data, "signals": filtered_signals, "config": config})
+
+@app.route('/range', methods=['GET'])
+def get_range():
+    global flask_data
+    return jsonify(
+        {
+            "start": flask_data[0]["timestamp"],
+            "end": flask_data[-1]["timestamp"],
+            "barInterval": flask_data[1]["timestamp"] - flask_data[0]["timestamp"],
+        }
+    )
 
 def start_server():
     app.run(debug=True, port=5000)
