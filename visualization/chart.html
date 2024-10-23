@@ -191,6 +191,9 @@
             const PriceLevelTextX = [];
             const PriceLevelTextY = [];
             const PriceLevelText = [];
+            const statusX = [];
+            const statusY = [];
+            const statusText = [];
 
             bars.forEach((bar) => {
                 kBarX.push(bar.timestamp * 1000 - bar.duration * 500, bar.timestamp * 1000 + bar.duration * 500, bar.timestamp * 1000 + bar.duration * 500, bar.timestamp * 1000 - bar.duration * 500, bar.timestamp * 1000 - bar.duration * 500, null);
@@ -198,12 +201,17 @@
                 kBarOpenCloseX.push(bar.timestamp * 1000 - bar.duration * 500, bar.timestamp * 1000 + bar.duration * 500, bar.timestamp * 1000 + bar.duration * 500, bar.timestamp * 1000 - bar.duration * 500, bar.timestamp * 1000 - bar.duration * 500, null);
                 kBarOpenCloseY.push(Math.min(bar.open, bar.close), Math.min(bar.open, bar.close), Math.max(bar.open, bar.close), Math.max(bar.open, bar.close), Math.min(bar.open, bar.close), null);
 
-                // 为每个 price level 绘制矩阵，并可视化 delta 和 volume
+                statusX.push(bar.timestamp * 1000);
+                statusY.push(bar.low - priceLevelHeight * 2);
+                statusText.push(JSON.stringify(bar.status));
+
+                recentMaxDelta = bar.status["RecentMaxDelta"] ? bar.status["RecentMaxDelta"] : maxDelta;
+                recentMaxVolume = bar.status["RecentMaxVolume"] ? bar.status["RecentMaxVolume"] : maxVolume;
                 bar.priceLevels.forEach((level) => {
                     const x0_delta = bar.timestamp - bar.duration / 2;
-                    const x1_delta = x0_delta + Math.min(1, (Math.abs(level.delta) / maxDelta)) * (bar.duration / 2);
+                    const x1_delta = x0_delta + Math.min(1, (Math.abs(level.delta) / recentMaxDelta)) * (bar.duration / 2);
                     const x0_volume = bar.timestamp;
-                    const x1_volume = x0_volume + Math.min(1, (level.volume / maxVolume)) * (bar.duration / 2);
+                    const x1_volume = x0_volume + Math.min(1, (level.volume / recentMaxVolume)) * (bar.duration / 2);
                     const y0 = level.price;
                     const y1 = level.price + priceLevelHeight;
 
@@ -222,7 +230,23 @@
                 });
             });
 
-            // 绘制 k-bar 的背景填充（浅灰色）
+            if (config.display_bar_status) {
+                traces.push({
+                    type: 'scatter',
+                    mode: 'markers',
+                    x: statusX,
+                    y: statusY,
+                    marker: {
+                        symbol: 'circle',
+                        size: 1,
+                        color: 'rgba(0, 0, 0, 0.2)'
+                    },
+                    hoverinfo: 'text',
+                    text: statusText.map(text => text.replace(/,/g, '<br>')),
+                    textposition: 'bottom center',
+                });
+            }
+
             traces.push({
                 name: 'k_bar',
                 type: 'scatter',

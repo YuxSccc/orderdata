@@ -234,6 +234,18 @@ class BarsSignal(Signal):
     def get_timestamp(self) -> tuple[int, int]:
         return self.kBarList[0].timestamp, self.kBarList[-1].timestamp
 
+class BarStatusSignal(Signal):
+    def __init__(self, signalName: str):
+        super().__init__(signalName)
+
+    @abstractmethod
+    def get_signal_str(self) -> str:
+        pass
+
+    @abstractmethod
+    def get_signal_dict(self) -> dict:
+        pass
+
 class Calculator(ABC):
     pass
 
@@ -248,6 +260,15 @@ class TickCalculator(Calculator):
         pass
 
 class BarCalculator(Calculator):
+    def __init__(self):
+        self.cal_finished = False
+        self.signals : list[Signal] = []
+
+    @abstractmethod
+    def calc_signal(self) -> list[Signal]:
+        pass
+
+class BarStatusCalculator(Calculator):
     def __init__(self):
         self.cal_finished = False
         self.signals : list[Signal] = []

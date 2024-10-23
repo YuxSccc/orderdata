@@ -60,7 +60,8 @@ def get_data():
         "signal_font_size": 14 if "signal_font_size" not in flask_config else flask_config["signal_font_size"],
         "price_level_font_size": 10 if "price_level_font_size" not in flask_config else flask_config["price_level_font_size"],
         "price_level_height": 1 if "price_level_height" not in flask_config else flask_config["price_level_height"],
-        "show_price_level_text": False if "show_price_level_text" not in flask_config else flask_config["show_price_level_text"]
+        "show_price_level_text": False if "show_price_level_text" not in flask_config else flask_config["show_price_level_text"],
+        "display_bar_status": False if "display_bar_status" not in flask_config else flask_config["display_bar_status"]
     }
 
     def lower_bound(data, target, key):

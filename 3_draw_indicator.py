@@ -24,11 +24,11 @@ def get_ticks(filename: str) -> list[Tick]:
             res.append(newTick)
         return res
 
-def encode_bars(bars: list[FootprintBar]) -> list[dict]:
+def encode_bars(bars: list[FootprintBar], status_list: list[dict]) -> list[dict]:
     res = []
-    for bar in bars:
+    for i in range(len(bars)):
         price_levels = []
-        for price_level in bar.priceLevels.values():
+        for price_level in bars[i].priceLevels.values():
             price_levels.append({
                 "price": bars[0].normalize_price(price_level.price),
                 "bidSize": price_level.bidSize,
@@ -37,14 +37,18 @@ def encode_bars(bars: list[FootprintBar]) -> list[dict]:
                 "delta": price_level.delta
             })
         assert len(price_levels) == len(set(level['price'] for level in price_levels)), f"Duplicate prices found in price levels: {price_levels}"
+        status_str = ""
+        for status_name, status_value in status_list[i].items():
+            status_str += f"{status_name}: {status_value}, "
         res.append({
-            "timestamp": bar.timestamp,
-            "duration": bar.duration,
-            "open": bars[0].normalize_price(bar.open),
-            "close": bars[0].normalize_price(bar.close),
-            "high": bars[0].normalize_price(bar.high),
-            "low": bars[0].normalize_price(bar.low),
-            "priceLevels": price_levels
+            "timestamp": bars[i].timestamp,
+            "duration": bars[i].duration,
+            "open": bars[0].normalize_price(bars[i].open),
+            "close": bars[0].normalize_price(bars[i].close),
+            "high": bars[0].normalize_price(bars[i].high),
+            "low": bars[0].normalize_price(bars[i].low),
+            "priceLevels": price_levels,
+            "status": status_list[i]
         })
     return res
 
@@ -78,7 +82,13 @@ def encode_signals(bars: list[FootprintBar], signals: list[Signal]):
             raise ValueError(f"Unknown signal type: {type(signal)}")
     return res
 
-def draw_indicator(bars: list[FootprintBar]) -> list[Signal]:
+def barstatus_encode(bars: list[FootprintBar]) -> list[dict]:
+    return [{
+        "timestamp": bar.timestamp,
+        "status": bar.status
+    } for bar in bars]
+
+def generate_signals(bars: list[FootprintBar]) -> list[Signal]:
     SL_orders_calculator = SLOrdersSignalCalculator(bars, 30, 3, 50/60000, 70)
     SL_orders_calculator.calc_signal()
     ticks = get_ticks(f'./agg_trade/{filename}.csv')
@@ -86,10 +96,32 @@ def draw_indicator(bars: list[FootprintBar]) -> list[Signal]:
     big_trade_calculator.calc_signal()
     trade_imbalance_calculator = TradeImbalanceSignalCalculator(bars, 5, 4, 50, 0.5)
     trade_imbalance_calculator.calc_signal()
+
     return SL_orders_calculator.signals + big_trade_calculator.signals + trade_imbalance_calculator.signals
+
+def generate_bar_status(bars: list[FootprintBar]):
+    recent_max_delta_volume_calculator = RecentMaxDeltaVolumeCalculator(bars, 30)
+    recent_max_delta_volume_calculator.calc_signal()
+    intraday_session_calculator = IntradaySessionCalculator(bars)
+    intraday_session_calculator.calc_signal()
+    weekday_holiday_marker_calculator = WeekdayHolidayMarkerCalculator(bars)
+    weekday_holiday_marker_calculator.calc_signal()
+
+    calculators = [recent_max_delta_volume_calculator, intraday_session_calculator, weekday_holiday_marker_calculator]
+
+    status_list = []
+    for i in range(len(bars)):
+        status_dict = {}
+        for calculator in calculators:
+            assert isinstance(calculator, BarStatusCalculator)
+            status_dict.update(calculator.signals[i].get_signal_dict())
+        status_list.append(status_dict)
+    return status_list
 
 if __name__ == "__main__":
     bars = get_bars(f'./footprint/{filename}.json')
-    signals = draw_indicator(bars)
-    set_data(encode_bars(bars), encode_signals(bars, signals), {"show_price_level_text": False, "price_level_height": (10 ** -bars[0].pricePrecision) * bars[0].scale})
+    signals = generate_signals(bars)
+    status_list = generate_bar_status(bars)
+    set_data(encode_bars(bars, status_list), encode_signals(bars, signals), 
+             {"show_price_level_text": False, "price_level_height": (10 ** -bars[0].pricePrecision) * bars[0].scale, "display_bar_status": True})
     start_server()

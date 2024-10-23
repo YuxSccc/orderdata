@@ -5,4 +5,4 @@ raw_data/*
 *.txt
 *.log
 *.pyc
-*.pycache
+__pycache__/
