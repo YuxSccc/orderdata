@@ -10,6 +10,14 @@ class Tick:
     def __str__(self):
         return f'timestamp: {self.timestamp}, price: {self.price}, size: {self.size}, isBuy: {self.isBuy}'
 
+class AggTick(Tick):
+    def __init__(self):
+        super().__init__()
+        self.count : int = 0
+
+    def __str__(self):
+        return f'timestamp: {self.timestamp}, price: {self.price}, size: {self.size}, isBuy: {self.isBuy}, count: {self.count}'
+
 class FootprintBar:
     class PriceLevel:
         def __init__(self, volumePrecision: int = None, pricePrecision: int = None):
@@ -111,9 +119,11 @@ class FootprintBar:
     def __str__(self):
         return f'timestamp: {self.timestamp}, open: {self.open}, high: {self.high}, low: {self.low}, close: {self.close}, volume: {self.volume}, delta: {self.delta}, tradesCount: {self.tradesCount}'
 
+    def get_price_level_height(self) -> float:
+        return self.scale * (10 ** -self.pricePrecision)
+
     def normalize_price(self, price: float) -> int:
-        one_price_unit = (10 ** -self.pricePrecision) * self.scale
-        return round(price // one_price_unit * one_price_unit, self.pricePrecision)
+        return round(price // self.get_price_level_height() * self.get_price_level_height(), self.pricePrecision)
 
     def handle_tick(self, tick: Tick) -> bool:
         if self.timestamp == 0:
@@ -250,7 +260,6 @@ class Calculator(ABC):
     pass
 
 class TickCalculator(Calculator):
-
     def __init__(self):
         self.cal_finished = False
         self.signals : list[Signal] = []

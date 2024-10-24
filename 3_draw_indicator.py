@@ -15,12 +15,19 @@ def get_ticks(filename: str) -> list[Tick]:
     with open(filename, 'r') as f:
         data = pd.read_csv(f)
         res = []
+        if 'count' in data.columns:
+            isAggTick = True
+        else:
+            isAggTick = False
+
         for row in data.itertuples():
-            newTick = Tick()
+            newTick = AggTick() if isAggTick else Tick()
             newTick.timestamp = int(row.time)
             newTick.price = float(row.price)
             newTick.size = float(row.qty)
             newTick.isBuy = row.is_buyer_maker == False
+            if isAggTick:
+                newTick.count = int(row.count)
             res.append(newTick)
         return res
 

@@ -95,4 +95,5 @@ class SLOrdersSignalCalculator(BarCalculator):
                     signal.set_significance(SL_orders_size)
                     signal.set_additional_info([-SL_orders_size, confirm_signal])
                     self.signals.append(signal)
+        self.is_calculated = True
         return self.signals

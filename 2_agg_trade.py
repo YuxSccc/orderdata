@@ -62,6 +62,7 @@ for file in os.listdir('./rawdata'):
                 'quote_qty': row.quote_qty,
                 'time': ts,
                 'is_buyer_maker': row.is_buyer_maker,
+                'count': 1
             }
             if op_agg['is_buyer_maker'] == True:
                 buySideAggregated = op_agg
@@ -70,6 +71,7 @@ for file in os.listdir('./rawdata'):
         else:
             op_agg['qty'] += row.qty
             op_agg['quote_qty'] += row.quote_qty
+            op_agg['count'] += 1
 
     if buySideAggregated:
         aggregated.append(buySideAggregated)
@@ -79,7 +81,7 @@ for file in os.listdir('./rawdata'):
     aggregated.sort(key=lambda x: (x['time'], x['id']))
 
     with open(f'./agg_trade/{filename}.csv', 'w', newline='') as csvfile:
-        fieldnames = ['id', 'price', 'qty', 'quote_qty', 'time', 'is_buyer_maker']
+        fieldnames = ['id', 'price', 'qty', 'quote_qty', 'time', 'is_buyer_maker', 'count']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
         writer.writeheader()
