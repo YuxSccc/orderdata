@@ -238,6 +238,9 @@ class BarsSignal(Signal):
         self.barAdditionalInfo.append(additionalInfo)
         self.colorTensor.append(colorTensor)
 
+    def get_color_tensor(self) -> list[list[set[int]]]:
+        return self.colorTensor
+
     def get_bars(self) -> list[FootprintBar]:
         return self.kBarList
     
@@ -257,16 +260,32 @@ class BarStatusSignal(Signal):
         pass
 
 class Calculator(ABC):
-    pass
+    @abstractmethod
+    def calc_signal(self) -> list[Signal]:
+        pass
+    
+    @abstractmethod
+    def get_feature_dimension(self) -> int:
+        pass
+
+    @abstractmethod
+    def get_feature_column_name(self) -> list[str]:
+        pass
+
+    @abstractmethod
+    def get_feature_name(self) -> str:
+        pass
+
+    def get_color_onehot_name(self, idx: int) -> str:
+        return f'{self.get_feature_name()}_color_{idx}'
+    
+    def get_feature_name_with_idx(self, idx: int) -> str:
+        return f'{self.get_feature_name()}_{self.get_feature_column_name()[idx]}'
 
 class TickCalculator(Calculator):
     def __init__(self):
         self.cal_finished = False
         self.signals : list[Signal] = []
-
-    @abstractmethod
-    def calc_signal(self) -> list[Signal]:
-        pass
 
 class BarCalculator(Calculator):
     def __init__(self):
@@ -274,14 +293,10 @@ class BarCalculator(Calculator):
         self.signals : list[Signal] = []
 
     @abstractmethod
-    def calc_signal(self) -> list[Signal]:
+    def get_max_color_size(self) -> int:
         pass
 
 class BarStatusCalculator(Calculator):
     def __init__(self):
         self.cal_finished = False
         self.signals : list[Signal] = []
-
-    @abstractmethod
-    def calc_signal(self) -> list[Signal]:
-        pass
