@@ -5,4 +5,5 @@ raw_data/*
 *.txt
 *.log
 *.pyc
-__pycache__/
+indicator/*
+!indicator/.gitkeep
