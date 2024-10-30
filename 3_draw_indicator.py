@@ -66,7 +66,7 @@ def encode_signals(bars: list[FootprintBar], signals: list[Signal]):
     res = []
     bar_duration = bars[0].duration
     for signal in signals:
-        if isinstance(signal, BarsSignal):
+        if isinstance(signal, MultiBarSignal):
             assert sorted(signal.get_bars(), key=lambda x: x.timestamp) == signal.get_bars()
             res.append({
                 "name": signal.get_signal_name(),
@@ -96,7 +96,7 @@ def barstatus_encode(bars: list[FootprintBar]) -> list[dict]:
     } for bar in bars]
 
 def generate_signals(bars: list[FootprintBar]) -> list[Signal]:
-    SL_orders_calculator = SLOrdersSignalCalculator(bars, 30, 3, 50/60000, 70)
+    SL_orders_calculator = StopLostOrdersSignalCalculator(bars, 30, 3, 50/60000, 70)
     SL_orders_calculator.calc_signal()
     ticks = get_ticks(f'./agg_trade/{filename}.csv')
     big_trade_calculator = BigTradeSignalCalculator(ticks, 200, 200)
@@ -120,7 +120,7 @@ def generate_bar_status(bars: list[FootprintBar]):
     for i in range(len(bars)):
         status_dict = {}
         for calculator in calculators:
-            assert isinstance(calculator, BarStatusCalculator)
+            assert isinstance(calculator, SingleBarSignalCalculator)
             status_dict.update(calculator.signals[i].get_signal_dict())
         status_list.append(status_dict)
     return status_list

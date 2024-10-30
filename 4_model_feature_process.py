@@ -158,6 +158,79 @@ def generate_price_level_feature(bars: list[FootprintBar]):
     price_level_features_df = pd.concat(price_level_features, ignore_index=True)
     return price_level_features_df, price_to_price_level_idx
 
+def generate_feature_df(indicator: Calculator, bars: list[FootprintBar], ticks: list[Tick]=None):
+    ts_to_idx = {}
+    for i in range(len(bars)):
+        ts_to_idx[bars[i].timestamp] = i
+    indicator_instance = indicator["indicator"]
+    feature_prefix = indicator["name"]
+    feature_name = indicator_instance.get_feature_name()
+    signals = indicator_instance.signals
+    if isinstance(indicator_instance, SingleBarSignalCalculator):
+        data_list = [[] for _ in range(indicator_instance.get_feature_dimension())]
+        for i in range(len(bars)):
+            signal = signals[i]
+            for j in range(indicator_instance.get_feature_dimension()):
+                data_list[j].append(signal.get_additional_info()[i])
+        return pd.DataFrame(data_list, columns=[feature_prefix + '_' + feature_name]), None
+
+    elif isinstance(indicator_instance, TickSignalCalculator):
+        tick_signal_dict = {}
+        for signal in signals:
+            bar_idx = ts_to_idx[signal.tick.timestamp]
+            if bar_idx not in tick_signal_dict:
+                tick_signal_dict[bar_idx] = []
+            tick_signal_dict[bar_idx].append(signal)
+        for i in range(len(bars)):
+            if i not in tick_signal_dict:
+                tick_signal_dict[i] = []
+        # onehot feature
+        bar_onehot_feature_list = []
+        for bar_idx, signals in tick_signal_dict.items():
+            bar_onehot_feature = [0] * len(bars[bar_idx].priceLevels)
+            for signal in signals:
+                price_level_idx = price_to_price_level_idx[bar_idx][signal.tick.price]
+                bar_onehot_feature[price_level_idx] = 1
+            bar_onehot_feature_list.append(bar_onehot_feature)
+        # signal feature
+        bars_feature_list = []
+        for bar_idx, signals in tick_signal_dict.items():
+            signal_feature_list = []
+            for signal in signals:
+                signal_feature_list.append(signal.get_additional_info())
+            bars_feature_list.append(signal_feature_list)
+        return pd.DataFrame(bars_feature_list, columns=[feature_prefix + '_' + feature_name]), pd.DataFrame(bar_onehot_feature_list, columns=[feature_prefix + '_' + feature_name])
+    elif isinstance(indicator_instance, MultiBarSignalCalculator):
+        bars_signal_dict = {}
+        for signal in signals:
+            for i in range(len(signal.get_bars())):
+                bars_signal_dict[ts_to_idx[signal.get_bars()[i].timestamp]].append([i, signal])
+        for i in range(len(bars)):
+            if i not in bars_signal_dict:
+                bars_signal_dict[i] = []    
+        # onehot feature
+        bar_onehot_feature_list = []
+        for bar_idx, [signal_bar_idx, signals] in bars_signal_dict.items():
+            bar_onehot_feature = [0 * indicator_instance.get_max_color_size()] * len(bars[bar_idx].priceLevels)
+            for signal in signals:
+                color_tensor = signal.get_color_tensor()[signal_bar_idx]
+                for color_set in color_tensor:
+                    assert len(color_set) == 1
+                    for color in color_set:
+                        bar_onehot_feature[color] = 1
+            bar_onehot_feature_list.append(bar_onehot_feature)
+        # signal feature
+        bars_feature_list = []
+        for bar_idx, [signal_bar_idx, signals] in bars_signal_dict.items():
+            signal_feature_list = []
+            for signal in signals:
+                signal_feature_list.append(signal.get_additional_info())
+            bars_feature_list.append(signal_feature_list)
+        return pd.DataFrame(bars_feature_list, columns=[feature_prefix + '_' + feature_name]), pd.DataFrame(bar_onehot_feature_list, columns=[feature_prefix + '_' + feature_name])
+
+    else:
+        raise ValueError(f"Indicator {indicator_instance.__name__} is not supported")
+
 if __name__ == "__main__":
     for file in filename:
         bars = get_bars(file)
@@ -167,19 +240,15 @@ if __name__ == "__main__":
         bar_feature_df = generate_bar_feature(bars)
         price_level_features_df, price_to_price_level_idx = generate_price_level_feature(bars)
 
-        ts_to_idx = {}
-        for i in range(len(bars)):
-            ts_to_idx[bars[i].timestamp] = i
-
         onehot_feature_df = pd.DataFrame()
 
         indicator_instance_list = []
 
         for indicator, config_list in config.items():
             for config_name, config_dict in config_list.items():
-                if isinstance(indicator, BarStatusCalculator) or isinstance(indicator, BarCalculator):
+                if isinstance(indicator, SingleBarSignalCalculator) or isinstance(indicator, MultiBarSignalCalculator):
                     indicator_instance = indicator(bars, **config_dict)
-                elif isinstance(indicator, TickCalculator):
+                elif isinstance(indicator, TickSignalCalculator):
                     indicator_instance = indicator(ticks, **config[indicator.__name__])
                 else:
                     raise ValueError(f"Indicator {indicator.__name__} is not supported")
@@ -187,76 +256,10 @@ if __name__ == "__main__":
                 indicator_instance_list.append({"name": config_name, "indicator": indicator_instance})
 
         for indicator in indicator_instance_list:
-            indicator_instance = indicator["indicator"]
-            feature_prefix = indicator["name"]
-            feature_name = indicator_instance.get_feature_name()
-            signals = indicator_instance.signals
-            if isinstance(indicator_instance, BarStatusCalculator):
-                data_list = [[] for _ in range(indicator_instance.get_feature_dimension())]
-                for i in range(len(bars)):
-                    signal = signals[i]
-                    for j in range(indicator_instance.get_feature_dimension()):
-                        data_list[j].append(signal.get_additional_info()[i])
-                global_feature_df[feature_prefix + '_' + feature_name] = data_list
-
-            elif isinstance(indicator_instance, TickCalculator):
-                tick_signal_dict = {}
-                for signal in signals:
-                    bar_idx = ts_to_idx[signal.tick.timestamp]
-                    if bar_idx not in tick_signal_dict:
-                        tick_signal_dict[bar_idx] = []
-                    tick_signal_dict[bar_idx].append(signal)
-                for i in range(len(bars)):
-                    if i not in tick_signal_dict:
-                        tick_signal_dict[i] = []
-                # onehot feature
-                bar_onehot_feature_list = []
-                for bar_idx, signals in tick_signal_dict.items():
-                    bar_onehot_feature = [0] * len(bars[bar_idx].priceLevels)
-                    for signal in signals:
-                        price_level_idx = price_to_price_level_idx[bar_idx][signal.tick.price]
-                        bar_onehot_feature[price_level_idx] = 1
-                    bar_onehot_feature_list.append(bar_onehot_feature)
-                onehot_feature_df[feature_prefix + '_' + feature_name] = bar_onehot_feature_list
-                # signal feature
-                bars_feature_list = []
-                for bar_idx, signals in tick_signal_dict.items():
-                    signal_feature_list = []
-                    for signal in signals:
-                        signal_feature_list.append(signal.get_additional_info())
-                    bars_feature_list.append(signal_feature_list)
-                global_feature_df[feature_prefix + '_' + feature_name] = bars_feature_list
-            elif isinstance(indicator_instance, BarCalculator):
-                bars_signal_dict = {}
-                for signal in signals:
-                    for i in range(len(signal.get_bars())):
-                        bars_signal_dict[ts_to_idx[signal.get_bars()[i].timestamp]].append([i, signal])
-                for i in range(len(bars)):
-                    if i not in bars_signal_dict:
-                        bars_signal_dict[i] = []    
-                # onehot feature
-                bar_onehot_feature_list = []
-                for bar_idx, [signal_bar_idx, signals] in bars_signal_dict.items():
-                    bar_onehot_feature = [0 * indicator_instance.get_max_color_size()] * len(bars[bar_idx].priceLevels)
-                    for signal in signals:
-                        color_tensor = signal.get_color_tensor()[signal_bar_idx]
-                        for color_set in color_tensor:
-                            assert len(color_set) == 1
-                            for color in color_set:
-                                bar_onehot_feature[color] = 1
-                    bar_onehot_feature_list.append(bar_onehot_feature)
-                onehot_feature_df[feature_prefix + '_' + feature_name] = bar_onehot_feature_list
-                # signal feature
-                bars_feature_list = []
-                for bar_idx, [signal_bar_idx, signals] in bars_signal_dict.items():
-                    signal_feature_list = []
-                    for signal in signals:
-                        signal_feature_list.append(signal.get_additional_info())
-                    bars_feature_list.append(signal_feature_list)
-                global_feature_df[feature_prefix + '_' + feature_name] = [signal_bar_idx] + bars_feature_list
-
-            else:
-                raise ValueError(f"Indicator {indicator_instance.__name__} is not supported")
+            feature_df, onehot_feature_df = generate_feature_df(indicator, bars, ticks)
+            global_feature_df = pd.concat([global_feature_df, feature_df], ignore_index=True)
+            if onehot_feature_df is not None:
+                onehot_feature_df = pd.concat([onehot_feature_df, onehot_feature_df], ignore_index=True)
 
         write_to_parquet(global_feature_df, output_bar_feature_parquet_path)
         write_to_parquet(onehot_feature_df, output_onehot_parquet_path)

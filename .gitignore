@@ -1,9 +1,9 @@
 footprint_data/*
 raw_data/*
+model_feature/*
 *.json
 *.csv
 *.txt
 *.log
 *.pyc
 indicator/*
-!indicator/.gitkeep

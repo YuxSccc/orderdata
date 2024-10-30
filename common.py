@@ -1,5 +1,7 @@
 import json
 from abc import ABC, abstractmethod
+import pandas as pd
+
 class Tick:
     def __init__(self):
         self.timestamp = 0
@@ -223,7 +225,7 @@ class TickSignal(Signal):
     def get_color(self):
         return 'green' if self.tick.isBuy else 'red'
 
-class BarsSignal(Signal):
+class MultiBarSignal(Signal):
     def __init__(self, signalName: str):
         super().__init__(signalName)
         self.kBarList : list[FootprintBar] = []
@@ -247,7 +249,7 @@ class BarsSignal(Signal):
     def get_timestamp(self) -> tuple[int, int]:
         return self.kBarList[0].timestamp, self.kBarList[-1].timestamp
 
-class BarStatusSignal(Signal):
+class SingleBarSignal(Signal):
     def __init__(self, signalName: str):
         super().__init__(signalName)
 
@@ -259,13 +261,27 @@ class BarStatusSignal(Signal):
     def get_signal_dict(self) -> dict:
         pass
 
+def cal_signal_hook(method):
+    def wrapper(self, *args, **kwargs):
+        result = method(self, *args, **kwargs)
+        self.after_calc_signal_hook(result)
+        return result
+    return wrapper
+
+class GlobalNormalizer:
+    def __init__(self, global_max_price, global_max_volume):
+        self.global_max_price = global_max_price
+        self.global_max_volume = global_max_volume
+
+    def normalize_price(self, price):
+        return price / self.global_max_price
+
+    def normalize_volume(self, volume):
+        return volume / self.global_max_volume
+
 class Calculator(ABC):
     @abstractmethod
     def calc_signal(self) -> list[Signal]:
-        pass
-    
-    @abstractmethod
-    def get_feature_dimension(self) -> int:
         pass
 
     @abstractmethod
@@ -276,18 +292,34 @@ class Calculator(ABC):
     def get_feature_name(self) -> str:
         pass
 
+    @abstractmethod
+    def get_signal_type(self) -> type[Signal]:
+        pass
+
+    # @abstractmethod
+    # def normalize_feature(self, feature: pd.DataFrame, globalNormalizer) -> pd.DataFrame:
+    #     pass
+
+    def get_feature_dimension(self) -> int:
+        return len(self.get_feature_column_name())
+
     def get_color_onehot_name(self, idx: int) -> str:
         return f'{self.get_feature_name()}_color_{idx}'
     
     def get_feature_name_with_idx(self, idx: int) -> str:
         return f'{self.get_feature_name()}_{self.get_feature_column_name()[idx]}'
 
-class TickCalculator(Calculator):
+    def after_calc_signal_hook(self, signals: list[Signal]):
+        self.signals = signals
+        self.cal_finished = True
+        # TODO: check color / signal / merge signal
+
+class TickSignalCalculator(Calculator):
     def __init__(self):
         self.cal_finished = False
         self.signals : list[Signal] = []
 
-class BarCalculator(Calculator):
+class MultiBarSignalCalculator(Calculator):
     def __init__(self):
         self.cal_finished = False
         self.signals : list[Signal] = []
@@ -296,7 +328,7 @@ class BarCalculator(Calculator):
     def get_max_color_size(self) -> int:
         pass
 
-class BarStatusCalculator(Calculator):
+class SingleBarSignalCalculator(Calculator):
     def __init__(self):
         self.cal_finished = False
         self.signals : list[Signal] = []
