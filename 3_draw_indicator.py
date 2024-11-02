@@ -99,7 +99,7 @@ def generate_signals(bars: list[FootprintBar]) -> list[Signal]:
     SL_orders_calculator = StopLostOrdersSignalCalculator(bars, 30, 3, 50/60000, 70)
     SL_orders_calculator.calc_signal()
     ticks = get_ticks(f'./agg_trade/{filename}.csv')
-    big_trade_calculator = BigTradeSignalCalculator(ticks, 200, 200)
+    big_trade_calculator = BigTradeCalculator(ticks, 200, 200)
     big_trade_calculator.calc_signal()
     trade_imbalance_calculator = TradeImbalanceSignalCalculator(bars, 5, 4, 50, 0.5)
     trade_imbalance_calculator.calc_signal()

@@ -1,6 +1,9 @@
 import json
 from abc import ABC, abstractmethod
 import pandas as pd
+import random
+from typing import Optional, Callable
+import numpy as np
 
 class Tick:
     def __init__(self):
@@ -253,9 +256,11 @@ class SingleBarSignal(Signal):
     def __init__(self, signalName: str):
         super().__init__(signalName)
 
-    @abstractmethod
     def get_signal_str(self) -> str:
-        pass
+        str = self.signalName + " : "
+        for key, value in self.get_signal_dict().items():
+            str += f"{key}: {value}, "
+        return str
 
     @abstractmethod
     def get_signal_dict(self) -> dict:
@@ -269,17 +274,135 @@ def cal_signal_hook(method):
     return wrapper
 
 class GlobalNormalizer:
-    def __init__(self, global_max_price, global_max_volume):
-        self.global_max_price = global_max_price
-        self.global_max_volume = global_max_volume
+    def __init__(self):
+        pass
 
-    def normalize_price(self, price):
-        return price / self.global_max_price
+    def set_max_price(self, max_price: float):
+        self.max_price = max_price
 
-    def normalize_volume(self, volume):
-        return volume / self.global_max_volume
+    def set_min_price(self, min_price: float):
+        self.min_price = min_price
+
+    def get_max_price(self) -> float:
+        return self.max_price
+
+    def get_min_price(self) -> float:
+        return self.min_price
+
+    @staticmethod
+    def _find_min_max_nested(data) -> tuple[Optional[float], Optional[float]]:
+        flat_values = []
+
+        def recursive_flatten(value):
+            if value is None:
+                pass
+            elif isinstance(value, np.ndarray):
+                flat_values.append(value.min())
+                flat_values.append(value.max())
+            elif isinstance(value, list):
+                for item in value:
+                    recursive_flatten(item)
+            else:
+                flat_values.append(value)
+                
+        recursive_flatten(data)
+        
+        return float(min(flat_values)) if len(flat_values) > 0 else None, float(max(flat_values)) if len(flat_values) > 0 else None
+
+    @staticmethod
+    def _normalize_value(value, normalize_func: Callable):
+        if value is None:
+            return None
+        elif isinstance(value, list):
+            return [GlobalNormalizer._normalize_value(v, normalize_func) for v in value]
+        else:
+            return normalize_func(value)
+
+    @staticmethod
+    def get_normalize_min_max_value(df: pd.Series) -> tuple[Optional[float], Optional[float]]:
+        min_value, max_value = GlobalNormalizer._find_min_max_nested(df.tolist())
+        if min_value is None or max_value is None:
+            return None, None
+        min_bias = random.random() * 0.1 + 0.2
+        max_bias = random.random() * 0.1 + 0.2
+        min_value = min_value * (1 - min_bias)
+        max_value = max_value * (1 + max_bias)
+        return min_value, max_value
+
+    def min_max_normalize_for_price(self, df: pd.Series, start_row: Optional[int] = None, end_row: Optional[int] = None):
+        return GlobalNormalizer.min_max_normalize(df, self.min_price, self.max_price, start_row=start_row, end_row=end_row)
+
+    @staticmethod
+    def min_max_normalize(df: pd.Series, min_value: Optional[float]=None, max_value: Optional[float]=None, 
+                          start_row: Optional[int] = None, end_row: Optional[int] = None):
+        if start_row is None:
+            start_row = 0
+        if end_row is None:
+            end_row = len(df) - 1
+        sub_df = df.loc[start_row:end_row]
+
+        if min_value is None or max_value is None:
+            min_value, max_value = GlobalNormalizer.get_normalize_min_max_value(sub_df)
+
+        if min_value is None or max_value is None or min_value == max_value:
+            return df
+        normalized_series = sub_df.apply(lambda x: GlobalNormalizer._normalize_value(x, lambda x: (x - min_value) / (max_value - min_value)))
+        normalized_df = df.copy()
+        normalized_df.loc[start_row:end_row] = normalized_series
+        return normalized_df
+
+    @staticmethod
+    def min_max_normalize_with_negative(df: pd.Series, min_value: Optional[float]=None, max_value: Optional[float]=None, 
+                                        start_row: Optional[int] = None, end_row: Optional[int] = None):
+        if start_row is None:
+            start_row = 0
+        if end_row is None:
+            end_row = len(df) - 1
+        sub_df = df.loc[start_row:end_row]
+
+        if min_value is None or max_value is None:
+            min_value, max_value = GlobalNormalizer.get_normalize_min_max_value(sub_df)
+
+        if min_value is None or max_value is None or min_value == max_value:
+            return df
+        normalized_series = sub_df.apply(lambda x: GlobalNormalizer._normalize_value(x, lambda x: 2 * (x - min_value) / (max_value - min_value) - 1))
+        normalized_df = df.copy()
+        normalized_df.loc[start_row:end_row] = normalized_series
+        return normalized_df
+
+    @staticmethod
+    def log_normalize_with_rows(series: pd.Series, start_row: Optional[int] = None, end_row: Optional[int] = None) -> pd.Series:
+        if start_row is None:
+            start_row = 0
+        if end_row is None:
+            end_row = len(series) - 1
+        sub_series = series.loc[start_row:end_row]
+
+        normalized_series = sub_series.apply(lambda x: GlobalNormalizer._normalize_value(x, lambda x: np.log1p(x)))
+        result_series = series.copy()
+        result_series.loc[start_row:end_row] = normalized_series
+        return GlobalNormalizer.min_max_normalize(result_series, start_row=start_row, end_row=end_row)
 
 class Calculator(ABC):
+    # _cache = {}
+
+    # def __new__(cls, *args, **kwargs):
+    #     cache_key = (cls, args, frozenset(kwargs.items()))
+
+    #     if cache_key in cls._cache:
+    #         return cls._cache[cache_key]
+
+    #     instance = super().__new__(cls)
+    #     cls._cache[cache_key] = instance
+    #     return instance
+
+    DO_NOTHING = 0
+    MIN_MAX_NORMALIZE = 1
+    MIN_MAX_NORMALIZE_WITH_NEGATIVE = 2
+    MIN_MAX_NORMALIZE_FOR_PRICE = 3
+    LOG_NORMALIZE = 4
+    CUSTOM_NORMALIZE = 5
+
     @abstractmethod
     def calc_signal(self) -> list[Signal]:
         pass
@@ -296,9 +419,41 @@ class Calculator(ABC):
     def get_signal_type(self) -> type[Signal]:
         pass
 
-    # @abstractmethod
-    # def normalize_feature(self, feature: pd.DataFrame, globalNormalizer) -> pd.DataFrame:
-    #     pass
+    @abstractmethod
+    def get_normalize_type(self) -> list[int]:
+        pass
+
+    def normalize_feature(self, feature: pd.Series, name: str, normalizer: GlobalNormalizer) -> pd.DataFrame:
+        expanded_df = pd.DataFrame(feature.apply(lambda x: [list(item) for item in zip(*x)]).tolist())
+        expanded_df.columns = [f'{name}_{i+1}' for i in range(expanded_df.shape[1])]
+        # if isinstance(self, TickSignalCalculator):
+        #     expanded_df = pd.DataFrame(feature.apply(lambda x: [list(item) for item in zip(*x)]).tolist())
+        #     expanded_df.columns = [f'{name}_{i+1}' for i in range(expanded_df.shape[1])]
+        # else:
+        #     expanded_df = pd.DataFrame(feature.tolist(), columns=[f'{name}_{i+1}' for i in range(self.get_feature_dimension())])
+        normalize_type = self.get_normalize_type()
+        # empty feature
+        if expanded_df.shape[1] != len(normalize_type):
+            return pd.DataFrame(None, index=range(expanded_df.shape[0]), columns=[f'{name}_{i+1}' for i in range(len(normalize_type))])
+        for idx, normalize_type in enumerate(normalize_type):
+            expanded_df[f'{name}_{idx+1}'] = self.do_simple_normalize(expanded_df[f'{name}_{idx+1}'], normalize_type, idx, normalizer)
+        return expanded_df
+
+    def do_simple_normalize(self, data: pd.Series, normalize_type: int, idx: int = -1, normalizer: GlobalNormalizer = None) -> pd.Series:
+        if normalize_type == Calculator.DO_NOTHING:
+            return data
+        elif normalize_type == Calculator.MIN_MAX_NORMALIZE:
+            return GlobalNormalizer.min_max_normalize(data)
+        elif normalize_type == Calculator.MIN_MAX_NORMALIZE_WITH_NEGATIVE:
+            return GlobalNormalizer.min_max_normalize_with_negative(data)
+        elif normalize_type == Calculator.MIN_MAX_NORMALIZE_FOR_PRICE:
+            return normalizer.min_max_normalize_for_price(data)
+        elif normalize_type == Calculator.LOG_NORMALIZE:
+            return GlobalNormalizer.log_normalize_with_rows(data)
+        elif normalize_type == Calculator.CUSTOM_NORMALIZE:
+            return self.do_custom_normalize(data, idx, normalizer)
+        else:
+            raise ValueError(f"Invalid normalize type: {normalize_type}")
 
     def get_feature_dimension(self) -> int:
         return len(self.get_feature_column_name())

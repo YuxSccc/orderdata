@@ -1,16 +1,24 @@
-from indicator import *
+import indicator
 from common import *
 import pandas as pd
 import pyarrow.parquet as pq
 import pyarrow as pa
 import torch.nn as nn
 import torch
+import importlib
 from model_common import *
+from config import *
 
 def get_bars(filename: str) -> list[FootprintBar]:
     with open(f'./footprint/{filename}.json', 'r') as f:
         data = json.load(f)
-        return [FootprintBar().from_dict(bar) for bar in data.values()]
+        res = [FootprintBar().from_dict(bar) for bar in data.values()]
+        for bar in res:
+            bar.high = bar.normalize_price(bar.high)
+            bar.low = bar.normalize_price(bar.low)
+            bar.open = bar.normalize_price(bar.open)
+            bar.close = bar.normalize_price(bar.close)
+        return res
 
 def get_ticks(filename: str) -> list[Tick]:
     with open(f'./agg_trade/{filename}.csv', 'r') as f:
@@ -53,45 +61,12 @@ class FeatureModule(nn.Module):
         return feature_vector
 
 filename = ['BTCUSDT-trades-2024-10-01']
-
 output_bar_parquet_path = './model_feature/output_bar.parquet'
 output_onehot_parquet_path = './model_feature/output_onehot.parquet'
 output_price_level_parquet_path = './model_feature/output_price_level.parquet'
 output_bar_feature_parquet_path = './model_feature/output_bar_feature.parquet'
-
-indicator_list = [
-    RecentMaxDeltaVolumeCalculator,
-    IntradaySessionCalculator,
-    WeekdayHolidayMarkerCalculator
-]
-
-# config = {
-#     'RecentMaxDeltaVolumeCalculator': {
-#         'main': {
-#             'window_size': 30
-#         }
-#     },
-#     'IntradaySessionCalculator': {
-#         'main': {
-#             'window_size': 30
-#         }
-#     },
-#     'WeekdayHolidayMarkerCalculator': {
-#         'main': {}
-#     }
-# }
-
-config = {}
-
-embedding_config = {
-    'BigTradeSignalCalculator': {
-        'max_feature_length': 5,
-        'embedding_dim': 16,
-        'param_dims': 5,
-        'num_categories': 2,
-        'use_attention': True
-    }
-}
+output_target_parquet_path = './model_feature/output_target.parquet'
+output_flow_parquet_path = './model_feature/output_flow.parquet'
 
 first_chunk_dict = {}
 
@@ -158,38 +133,40 @@ def generate_price_level_feature(bars: list[FootprintBar]):
     price_level_features_df = pd.concat(price_level_features, ignore_index=True)
     return price_level_features_df, price_to_price_level_idx
 
-def generate_feature_df(indicator: Calculator, bars: list[FootprintBar], ticks: list[Tick]=None):
+def generate_feature_df(indicator: Calculator, bars: list[FootprintBar], ticks: list[Tick]=None, price_to_price_level_idx: list[dict]=None):
+    duration = bars[0].duration
+    price_interval = bars[0].get_price_level_height()
     ts_to_idx = {}
     for i in range(len(bars)):
         ts_to_idx[bars[i].timestamp] = i
     indicator_instance = indicator["indicator"]
     feature_prefix = indicator["name"]
     feature_name = indicator_instance.get_feature_name()
-    signals = indicator_instance.signals
+    signals_group = indicator_instance.signals
     if isinstance(indicator_instance, SingleBarSignalCalculator):
-        data_list = [[] for _ in range(indicator_instance.get_feature_dimension())]
+        data_list = []
         for i in range(len(bars)):
-            signal = signals[i]
-            for j in range(indicator_instance.get_feature_dimension()):
-                data_list[j].append(signal.get_additional_info()[i])
-        return pd.DataFrame(data_list, columns=[feature_prefix + '_' + feature_name]), None
+            signal = signals_group[i]
+            data_list.append([signal.get_additional_info()])
+        return pd.DataFrame({f"{feature_prefix}_{feature_name}": data_list}), None
 
     elif isinstance(indicator_instance, TickSignalCalculator):
         tick_signal_dict = {}
-        for signal in signals:
-            bar_idx = ts_to_idx[signal.tick.timestamp]
+        for signal in signals_group:
+            bar_idx = ts_to_idx[signal.tick.timestamp // 1000 // duration * duration]
             if bar_idx not in tick_signal_dict:
                 tick_signal_dict[bar_idx] = []
             tick_signal_dict[bar_idx].append(signal)
         for i in range(len(bars)):
             if i not in tick_signal_dict:
                 tick_signal_dict[i] = []
+        tick_signal_dict = dict(sorted(tick_signal_dict.items()))
         # onehot feature
         bar_onehot_feature_list = []
         for bar_idx, signals in tick_signal_dict.items():
             bar_onehot_feature = [0] * len(bars[bar_idx].priceLevels)
             for signal in signals:
-                price_level_idx = price_to_price_level_idx[bar_idx][signal.tick.price]
+                price_level_idx = price_to_price_level_idx[bar_idx][signal.tick.price // price_interval * price_interval]
                 bar_onehot_feature[price_level_idx] = 1
             bar_onehot_feature_list.append(bar_onehot_feature)
         # signal feature
@@ -199,69 +176,190 @@ def generate_feature_df(indicator: Calculator, bars: list[FootprintBar], ticks: 
             for signal in signals:
                 signal_feature_list.append(signal.get_additional_info())
             bars_feature_list.append(signal_feature_list)
-        return pd.DataFrame(bars_feature_list, columns=[feature_prefix + '_' + feature_name]), pd.DataFrame(bar_onehot_feature_list, columns=[feature_prefix + '_' + feature_name])
+        return pd.DataFrame({f"{feature_prefix}_{feature_name}": bars_feature_list}), \
+            pd.DataFrame({f"{feature_prefix}_{feature_name}": bar_onehot_feature_list})
     elif isinstance(indicator_instance, MultiBarSignalCalculator):
-        bars_signal_dict = {}
-        for signal in signals:
+        bars_signal_list = [[] for _ in range(len(bars))]
+        for signal in signals_group:
             for i in range(len(signal.get_bars())):
-                bars_signal_dict[ts_to_idx[signal.get_bars()[i].timestamp]].append([i, signal])
-        for i in range(len(bars)):
-            if i not in bars_signal_dict:
-                bars_signal_dict[i] = []    
+                bars_signal_list[ts_to_idx[signal.get_bars()[i].timestamp]].append((i, signal))
         # onehot feature
         bar_onehot_feature_list = []
-        for bar_idx, [signal_bar_idx, signals] in bars_signal_dict.items():
-            bar_onehot_feature = [0 * indicator_instance.get_max_color_size()] * len(bars[bar_idx].priceLevels)
-            for signal in signals:
+        for bar_idx, signals in enumerate(bars_signal_list):
+            bar_onehot_feature = [[0] * indicator_instance.get_max_color_size()] * len(bars[bar_idx].priceLevels)
+            for signal_bar_idx, signal in signals:
                 color_tensor = signal.get_color_tensor()[signal_bar_idx]
                 for color_set in color_tensor:
-                    assert len(color_set) == 1
+                    assert len(color_set) <= 1
                     for color in color_set:
                         bar_onehot_feature[color] = 1
             bar_onehot_feature_list.append(bar_onehot_feature)
         # signal feature
         bars_feature_list = []
-        for bar_idx, [signal_bar_idx, signals] in bars_signal_dict.items():
+        for bar_idx, signals in enumerate(bars_signal_list):
             signal_feature_list = []
-            for signal in signals:
+            for signal_bar_idx, signal in signals:
                 signal_feature_list.append(signal.get_additional_info())
             bars_feature_list.append(signal_feature_list)
-        return pd.DataFrame(bars_feature_list, columns=[feature_prefix + '_' + feature_name]), pd.DataFrame(bar_onehot_feature_list, columns=[feature_prefix + '_' + feature_name])
+        return pd.DataFrame({f"{feature_prefix}_{feature_name}": bars_feature_list}), \
+            pd.DataFrame({f"{feature_prefix}_{feature_name}": bar_onehot_feature_list})
 
     else:
         raise ValueError(f"Indicator {indicator_instance.__name__} is not supported")
 
+def generate_flow_feature(indicator: Calculator, bars: list[FootprintBar], ticks: list[Tick]=None, price_to_price_level_idx: list[dict]=None):
+    ts_to_idx = {}
+    for i in range(len(bars)):
+        ts_to_idx[bars[i].timestamp] = i
+    assert indicator["indicator"].get_feature_name() in flow_feature_list
+    indicator_instance = indicator["indicator"]
+    feature_prefix = indicator["name"]
+    feature_name = indicator_instance.get_feature_name()
+    bars_feature_list = []
+    if isinstance(indicator_instance, MultiBarSignalCalculator):
+        for start_bar_idx in range(len(bars) - seq_len + 1):
+            end_bar_idx = start_bar_idx + seq_len - 1
+            signals_group = indicator_instance.fast_calc_signal(start_bar_idx, end_bar_idx)
+            bars_signal_list = [[] for _ in range(len(bars))]
+            for signal in signals_group:
+                for i in range(len(signal.get_bars())):
+                    bars_signal_list[ts_to_idx[signal.get_bars()[i].timestamp]].append((i, signal))
+            # signal feature
+            for i in range(start_bar_idx, end_bar_idx + 1):
+                signals = bars_signal_list[i]
+                signal_feature_list = []
+                for signal_bar_idx, signal in signals:
+                    signal_feature_list.append(signal.get_additional_info())
+                bars_feature_list.append(signal_feature_list)
+                
+    return pd.DataFrame({f"{feature_prefix}_{feature_name}_flow": bars_feature_list})
+
+def generate_target_feature(bars: list[FootprintBar], step1_size=5, step2_size=10, step_5_target=0.003, step_10_target=0.005):
+    df = pd.DataFrame(index=range(len(bars)), columns=["reach_5_steps_high", "reach_10_steps_high", "reach_5_steps_low", "reach_10_steps_low"])
+    df.infer_objects(copy=False).fillna(0, inplace=True)
+    n = len(bars)
+    for i in range(n):
+        current_price = bars[i].close
+        for j in range(1, step1_size + 1):
+            if i + j >= n:
+                break
+            future_price = bars[i + j].high
+            price_change = (future_price - current_price) / current_price
+            if price_change >= step_5_target:
+                df.loc[i, 'reach_5_steps_high'] = 1
+                break
+            
+        for j in range(1, step2_size + 1):
+            if i + j >= n:
+                break
+            future_price = bars[i + j].high
+            price_change = (future_price - current_price) / current_price
+            if price_change >= step_10_target:
+                df.loc[i, 'reach_10_steps_high'] = 1
+                break
+
+    for i in range(n):
+        current_price = bars[i].close
+        for j in range(1, step1_size + 1):
+            if i + j >= n:
+                break
+            future_price = bars[i + j].low
+            price_change = (future_price - current_price) / current_price
+            if price_change <= -step_5_target:
+                df.loc[i, 'reach_5_steps_low'] = 1
+                break
+            
+        for j in range(1, step2_size + 1):
+            if i + j >= n:
+                break
+            future_price = bars[i + j].low
+            price_change = (future_price - current_price) / current_price
+            if price_change <= -step_10_target:
+                df.loc[i, 'reach_10_steps_low'] = 1
+                break
+    return df
+
+# def print_plt(data_list: list[list[float]]):
+#     data_list = [[],[],[],[]]
+#     for i in range(global_flow_feature_df.shape[0]):
+#         ta = global_flow_feature_df.iloc[i, 0]
+#         if not (isinstance(ta, list) and len(ta) > 0 and len(ta[0]) > 2):
+#             print(i, ta)
+#         else:
+#             val = ta[0][4]
+#             if val < 0.008:
+#                 data_list[0].append(val)
+#             if val <= 0.025 and val >= 0.008:
+#                 data_list[1].append(val)
+#             if val > 0.025:
+#                 data_list[2].append(val)
+#             data_list[3].append(val)
+#     print(len(data_list[0]), len(data_list[1]), len(data_list[2]))
+#     import matplotlib.pyplot as plt
+#     plt.figure(figsize=(10, 5))
+#     plt.hist(data_list[3], bins=150, density=True, alpha=0.6, color='b', label='Histogram')
+#     plt.xlabel('Value')
+#     plt.ylabel('Density')
+#     plt.title('Data Distribution (Histogram)')
+#     plt.legend()
+#     plt.savefig("output.png")
+
 if __name__ == "__main__":
     for file in filename:
         bars = get_bars(file)
+        target_feature_df = generate_target_feature(bars)
+        pd.set_option('display.max_rows', None)
         ticks = get_ticks(file)
         global_feature_df = pd.DataFrame()
 
         bar_feature_df = generate_bar_feature(bars)
         price_level_features_df, price_to_price_level_idx = generate_price_level_feature(bars)
 
-        onehot_feature_df = pd.DataFrame()
+        global_onehot_feature_df = pd.DataFrame()
+        global_flow_feature_df = pd.DataFrame()
+        normalizer = GlobalNormalizer()
+        min_value, max_value = normalizer.get_normalize_min_max_value(bar_feature_df.loc[:, "close"])
+        normalizer.set_max_price(max_value)
+        normalizer.set_min_price(min_value)
 
         indicator_instance_list = []
-
-        for indicator, config_list in config.items():
+        for indicator_name, config_list in config.items():
             for config_name, config_dict in config_list.items():
-                if isinstance(indicator, SingleBarSignalCalculator) or isinstance(indicator, MultiBarSignalCalculator):
-                    indicator_instance = indicator(bars, **config_dict)
-                elif isinstance(indicator, TickSignalCalculator):
-                    indicator_instance = indicator(ticks, **config[indicator.__name__])
+                indicator_cls = getattr(indicator, indicator_name)
+                if issubclass(indicator_cls, indicator.SpeedBarCalculator):
+                    indicator_instance = indicator_cls(bars, ticks, **config_dict)
+                elif issubclass(indicator_cls, SingleBarSignalCalculator) or issubclass(indicator_cls, MultiBarSignalCalculator):
+                    indicator_instance = indicator_cls(bars, **config_dict)
+                elif issubclass(indicator_cls, TickSignalCalculator):
+                    indicator_instance = indicator_cls(ticks, **config_dict)
                 else:
-                    raise ValueError(f"Indicator {indicator.__name__} is not supported")
+                    raise ValueError(f"Indicator {indicator_cls} is not supported")
                 indicator_instance.calc_signal()
                 indicator_instance_list.append({"name": config_name, "indicator": indicator_instance})
-
+        sum_feature_size = 0
         for indicator in indicator_instance_list:
-            feature_df, onehot_feature_df = generate_feature_df(indicator, bars, ticks)
-            global_feature_df = pd.concat([global_feature_df, feature_df], ignore_index=True)
-            if onehot_feature_df is not None:
-                onehot_feature_df = pd.concat([onehot_feature_df, onehot_feature_df], ignore_index=True)
-
+            feature_name = indicator["indicator"].get_feature_name()
+            sum_feature_size += indicator["indicator"].get_feature_dimension()
+            if feature_name == "Trend":
+                feature_df = generate_flow_feature(indicator, bars, ticks, price_to_price_level_idx)
+                feature_df = indicator["indicator"].normalize_feature(feature_df.iloc[:, 0], indicator['name'] + "_" + feature_name, normalizer)
+                global_flow_feature_df = pd.concat([global_flow_feature_df, feature_df], axis=1)
+            else:
+                feature_df, onehot_feature_df = generate_feature_df(indicator, bars, ticks, price_to_price_level_idx)
+                feature_df = indicator["indicator"].normalize_feature(feature_df.iloc[:, 0], indicator['name'] + "_" + feature_name, normalizer)
+                global_feature_df = pd.concat([global_feature_df, feature_df], axis=1)
+                if onehot_feature_df is not None:
+                    global_onehot_feature_df = pd.concat([global_onehot_feature_df, onehot_feature_df], axis=1)
+        # print(global_feature_df)
+        # print(global_onehot_feature_df)
+        # print(sum_feature_size)
+        # print(bar_feature_df.shape)
+        # print(price_level_features_df.shape)
         write_to_parquet(global_feature_df, output_bar_feature_parquet_path)
-        write_to_parquet(onehot_feature_df, output_onehot_parquet_path)
+        write_to_parquet(global_onehot_feature_df, output_onehot_parquet_path)
+        write_to_parquet(global_flow_feature_df, output_flow_parquet_path)
+        print(global_flow_feature_df)
+        global_flow_feature_df.to_html("output.html")
         write_to_parquet(price_level_features_df, output_price_level_parquet_path)
-        write_to_parquet(bar_feature_df, output_bar_feature_parquet_path)
+        write_to_parquet(bar_feature_df, output_bar_parquet_path)
+        write_to_parquet(target_feature_df, output_target_parquet_path)
