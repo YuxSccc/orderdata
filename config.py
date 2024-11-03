@@ -56,19 +56,37 @@ config = {
         }
     },
     'LastImbalanceCalculator': {
-        'buy': {
+        'buyh': {
             'diagonal_multiple_threshold': 4,
             'imbalance_price_level_threshold': 3,
             'sum_delta_threshold': 100,
             'ignore_volume': 1,
-            'is_buy_imbalance': True
+            'is_buy_imbalance': True,
+            'higher_price_side': True
         },
-        'sell': {
+        'buyl': {
             'diagonal_multiple_threshold': 4,
             'imbalance_price_level_threshold': 3,
             'sum_delta_threshold': 100,
             'ignore_volume': 1,
-            'is_buy_imbalance': False
+            'is_buy_imbalance': True,
+            'higher_price_side': False
+        },
+        'sellh': {
+            'diagonal_multiple_threshold': 4,
+            'imbalance_price_level_threshold': 3,
+            'sum_delta_threshold': 100,
+            'ignore_volume': 1,
+            'is_buy_imbalance': False,
+            'higher_price_side': True
+        },
+        'selll': {
+            'diagonal_multiple_threshold': 4,
+            'imbalance_price_level_threshold': 3,
+            'sum_delta_threshold': 100,
+            'ignore_volume': 1,
+            'is_buy_imbalance': False,
+            'higher_price_side': False
         }
     },
     'LastLowHighPriceCalculator': {
@@ -188,7 +206,7 @@ embedding_config = {
     BigTradeCalculator.get_feature_name(): {
         'max_feature_length': 4,
         'embedding_dim': next_power_of_2(BigTradeCalculator.get_feature_column_name().__len__() * 4),
-        'param_dims': BigTradeCalculator.get_feature_column_name().__len__(),
+        'param_dim': BigTradeCalculator.get_feature_column_name().__len__(),
         'category_dim': 0,
         'num_categories': 0,
         'use_attention': True
@@ -196,7 +214,7 @@ embedding_config = {
     DeltaClusterCalculator.get_feature_name(): {
         'max_feature_length': 1,
         'embedding_dim': next_power_of_2(DeltaClusterCalculator.get_feature_column_name().__len__() * 1),
-        'param_dims': DeltaClusterCalculator.get_feature_column_name().__len__(),
+        'param_dim': DeltaClusterCalculator.get_feature_column_name().__len__(),
         'category_dim': 0,
         'num_categories': 0,
         'use_attention': True
@@ -204,15 +222,15 @@ embedding_config = {
     ExtremePriceCalculator.get_feature_name(): {
         'max_feature_length': 1,
         'embedding_dim': next_power_of_2(ExtremePriceCalculator.get_feature_column_name().__len__() * 1),
-        'param_dims': ExtremePriceCalculator.get_feature_column_name().__len__(),
-        'category_dim': 2,
-        'num_categories': 3,
+        'param_dim': ExtremePriceCalculator.get_feature_column_name().__len__(),
+        'category_dim': 0,
+        'num_categories': 0,
         'use_attention': True
     },
     HugeLmtCalculator.get_feature_name(): {
         'max_feature_length': 3,
         'embedding_dim': next_power_of_2(HugeLmtCalculator.get_feature_column_name().__len__() * 3),
-        'param_dims': HugeLmtCalculator.get_feature_column_name().__len__(),
+        'param_dim': HugeLmtCalculator.get_feature_column_name().__len__(),
         'category_dim': 0,
         'num_categories': 0,
         'use_attention': True
@@ -220,7 +238,7 @@ embedding_config = {
     IntradaySessionCalculator.get_feature_name(): {
         'max_feature_length': 1,
         'embedding_dim': next_power_of_2(IntradaySessionCalculator.get_feature_column_name().__len__() * 1),
-        'param_dims': IntradaySessionCalculator.get_feature_column_name().__len__(),
+        'param_dim': IntradaySessionCalculator.get_feature_column_name().__len__() - 1,
         'category_dim': 2,
         'num_categories': 4,
         'use_attention': True
@@ -228,7 +246,7 @@ embedding_config = {
     LastImbalanceCalculator.get_feature_name(): {
         'max_feature_length': 1,
         'embedding_dim': next_power_of_2(LastImbalanceCalculator.get_feature_column_name().__len__() * 2),
-        'param_dims': LastImbalanceCalculator.get_feature_column_name().__len__(),
+        'param_dim': LastImbalanceCalculator.get_feature_column_name().__len__(),
         'category_dim': 0,
         'num_categories': 0,
         'use_attention': True
@@ -236,7 +254,7 @@ embedding_config = {
     LastLowHighPriceCalculator.get_feature_name(): {
         'max_feature_length': 1,
         'embedding_dim': next_power_of_2(LastLowHighPriceCalculator.get_feature_column_name().__len__() * 2),
-        'param_dims': LastLowHighPriceCalculator.get_feature_column_name().__len__(),
+        'param_dim': LastLowHighPriceCalculator.get_feature_column_name().__len__(),
         'category_dim': 0,
         'num_categories': 0,
         'use_attention': True
@@ -244,7 +262,7 @@ embedding_config = {
     NoLiquidityLevelsCalculator.get_feature_name(): {
         'max_feature_length': 1,
         'embedding_dim': next_power_of_2(NoLiquidityLevelsCalculator.get_feature_column_name().__len__() * 1),
-        'param_dims': NoLiquidityLevelsCalculator.get_feature_column_name().__len__(),
+        'param_dim': NoLiquidityLevelsCalculator.get_feature_column_name().__len__(),
         'category_dim': 0,
         'num_categories': 0,
         'use_attention': True
@@ -252,7 +270,7 @@ embedding_config = {
     PBPatternCalculator.get_feature_name(): {
         'max_feature_length': 1,
         'embedding_dim': next_power_of_2(PBPatternCalculator.get_feature_column_name().__len__() * 2),
-        'param_dims': PBPatternCalculator.get_feature_column_name().__len__(),
+        'param_dim': PBPatternCalculator.get_feature_column_name().__len__() - 1,
         'category_dim': 2,
         'num_categories': 4,
         'use_attention': True
@@ -260,7 +278,7 @@ embedding_config = {
     RecentMaxDeltaVolumeCalculator.get_feature_name(): {
         'max_feature_length': 1,
         'embedding_dim': next_power_of_2(RecentMaxDeltaVolumeCalculator.get_feature_column_name().__len__() * 2),
-        'param_dims': RecentMaxDeltaVolumeCalculator.get_feature_column_name().__len__(),
+        'param_dim': RecentMaxDeltaVolumeCalculator.get_feature_column_name().__len__(),
         'category_dim': 0,
         'num_categories': 0,
         'use_attention': True
@@ -268,7 +286,7 @@ embedding_config = {
     SpeedBarCalculator.get_feature_name(): {
         'max_feature_length': 1,
         'embedding_dim': next_power_of_2(SpeedBarCalculator.get_feature_column_name().__len__() * 2),
-        'param_dims': SpeedBarCalculator.get_feature_column_name().__len__(),
+        'param_dim': SpeedBarCalculator.get_feature_column_name().__len__(),
         'category_dim': 0,
         'num_categories': 0,
         'use_attention': True
@@ -276,7 +294,7 @@ embedding_config = {
     StopLostOrdersCalculator.get_feature_name(): {
         'max_feature_length': 1,
         'embedding_dim': next_power_of_2(StopLostOrdersCalculator.get_feature_column_name().__len__() * 2),
-        'param_dims': StopLostOrdersCalculator.get_feature_column_name().__len__(),
+        'param_dim': StopLostOrdersCalculator.get_feature_column_name().__len__() - 1,
         'category_dim': 2,
         'num_categories': 2,
         'use_attention': True
@@ -284,7 +302,7 @@ embedding_config = {
     TradeImbalanceCalculator.get_feature_name(): {
         'max_feature_length': 2,
         'embedding_dim': next_power_of_2(TradeImbalanceCalculator.get_feature_column_name().__len__() * 2),
-        'param_dims': TradeImbalanceCalculator.get_feature_column_name().__len__(),
+        'param_dim': TradeImbalanceCalculator.get_feature_column_name().__len__(),
         'category_dim': 0,
         'num_categories': 0,
         'use_attention': True
@@ -292,7 +310,7 @@ embedding_config = {
     TrendCalculator.get_feature_name(): {
         'max_feature_length': 1,
         'embedding_dim': next_power_of_2(TrendCalculator.get_feature_column_name().__len__() * 2),
-        'param_dims': TrendCalculator.get_feature_column_name().__len__(),
+        'param_dim': TrendCalculator.get_feature_column_name().__len__() - 1,
         'category_dim': 2,
         'num_categories': 4,
         'use_attention': True
@@ -300,14 +318,47 @@ embedding_config = {
     WeekdayHolidayMarkerCalculator.get_feature_name(): {
         'max_feature_length': 1,
         'embedding_dim': next_power_of_2(WeekdayHolidayMarkerCalculator.get_feature_column_name().__len__()),
-        'param_dims': WeekdayHolidayMarkerCalculator.get_feature_column_name().__len__(),
-        'category_dim': 3,
+        'param_dim': WeekdayHolidayMarkerCalculator.get_feature_column_name().__len__() - 1,
+        'category_dim': 4,
         'num_categories': 7,
+        'use_attention': True
+    },
+    "PriceLevels": {
+        'max_feature_length': 15,
+        'embedding_dim': 128,
+        'param_dim': 16,
+        'category_dim': 0,
+        'num_categories': 0,
         'use_attention': True
     }
 }
+
+def get_feature_embedding_config(features_name: list[str]):
+    result = {}
+    for name in features_name:
+        _, feature_name = name.split("_")
+        if feature_name not in embedding_config:
+            raise ValueError(f"Feature {feature_name} not found in embedding_config")
+        result[name] = embedding_config[feature_name]
+
+    # result["main_PriceLevels"] = {
+    #     'max_feature_length': 15,
+    #     'embedding_dim': 128,
+    #     'param_dim': 16,
+    #     'category_dim': 0,
+    #     'num_categories': 0,
+    #     'use_attention': True
+    # }
+
+    return result
+
 
 flow_feature_list = ['Trend']
 
 seq_len = 100
 batch_size = 32
+
+output_flow_parquet_path = './model_feature/output_flow.parquet'
+output_target_parquet_path = './model_feature/output_target.parquet'
+output_event_parquet_path = './model_feature/output_event.parquet'
+output_number_parquet_path = './model_feature/output_number.parquet'

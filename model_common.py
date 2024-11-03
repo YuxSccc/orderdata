@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
 
 class PositionalEncoding(nn.Module):
     def __init__(self, embedding_dim, max_len=5000):
@@ -53,7 +55,7 @@ class FeatureEmbedding(nn.Module):
 
         if self.use_attention:
             # 使用 TransformerEncoder 作为注意力机制
-            encoder_layer = nn.TransformerEncoderLayer(d_model=self.combined_embedding_dim, nhead=4)
+            encoder_layer = nn.TransformerEncoderLayer(d_model=self.combined_embedding_dim, nhead=max(2, self.combined_embedding_dim // 16))
             self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
         else:
             # 如果不使用注意力机制，可以在这里添加其他处理方式
@@ -77,18 +79,18 @@ class FeatureEmbedding(nn.Module):
 
         if num_features == 0:
             # 如果没有特征，返回全零的向量
-            aggregated_feature = torch.zeros(1, self.embedding_dim, device=device)
+            aggregated_feature = torch.zeros(1, self.combined_embedding_dim, device=device)
             return aggregated_feature
 
         # 将特征参数转换为张量
-        feature_params_tensor = torch.tensor(feature_params, dtype=torch.float32, device=device)  # [num_features, param_dim]
+        feature_params_tensor = torch.tensor(np.array(feature_params), dtype=torch.float32, device=device)  # [num_features, param_dim]
         param_embeds = self.param_embedding(feature_params_tensor)  # [num_features, embedding_dim]
 
         if self.use_category_embedding:
             assert feature_categories is not None, "feature_categories must be provided when num_categories > 1"
             feature_categories_tensor = torch.tensor(feature_categories, dtype=torch.long, device=device)  # [num_features]
             category_embeds = self.category_embedding(feature_categories_tensor)  # [num_features, category_dim]
-            embedded_features = category_embeds + param_embeds  # [num_features, combined_embedding_dim]
+            embedded_features = torch.cat([category_embeds, param_embeds], dim=1)  # [num_features, combined_embedding_dim]
         else:
             embedded_features = param_embeds  # [num_features, combined_embedding_dim]
 
@@ -173,14 +175,21 @@ class MainModel(nn.Module):
                 use_attention=config.get('use_attention', True)
             )
             total_embedding_dim += config['embedding_dim']
+            total_embedding_dim += config['category_dim']
 
         # 每个时间步的特征维度
         self.time_step_feature_dim = other_feature_dim + total_embedding_dim
 
+        nhead = 32
+        if self.time_step_feature_dim % nhead != 0:
+            self.pad_dim = nhead - (self.time_step_feature_dim % nhead)
+        else:
+            self.pad_dim = 0
+        self.padded_feature_dim = self.time_step_feature_dim + self.pad_dim
         # 时间序列的 Transformer
-        encoder_layer = nn.TransformerEncoderLayer(d_model=self.time_step_feature_dim, nhead=4)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=self.padded_feature_dim, nhead=32)
         self.time_transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
-        self.positional_encoding = PositionalEncoding(self.time_step_feature_dim, max_len=total_time_steps)
+        self.positional_encoding = PositionalEncoding(self.padded_feature_dim, max_len=total_time_steps)
 
         # 全连接层，用于输出预测结果
         self.fc_layers = nn.Sequential(
@@ -214,14 +223,14 @@ class MainModel(nn.Module):
             embedded_feature_list = []
 
             for feature_name, feature_embedding in self.feature_embeddings.items():
-                feature_params_batch, feature_categories_batch = feature_data_dict.get(feature_name, ([], None))
+                feature_params_batch, feature_categories_batch = feature_data_dict.get(feature_name, ({}, {}))
 
                 # 处理批次中的每个样本
                 aggregated_features = []
 
                 for i in range(batch_size):
-                    feature_params = feature_params_batch[i]
-                    feature_categories = feature_categories_batch[i] if feature_categories_batch is not None else None
+                    feature_params = feature_params_batch[i] if i in feature_params_batch else []
+                    feature_categories = feature_categories_batch[i] if i in feature_categories_batch else None
 
                     aggregated_feature = feature_embedding(feature_params, feature_categories)  # [1, embedding_dim]
                     aggregated_features.append(aggregated_feature)
@@ -232,13 +241,16 @@ class MainModel(nn.Module):
 
             # 拼接其他特征和嵌入特征，得到当前时间步的表示
             time_step_input = torch.cat([other_features] + embedded_feature_list, dim=1)  # [batch_size, time_step_feature_dim]
-            time_step_embeddings.append(time_step_input.unsqueeze(1))  # [batch_size, 1, time_step_feature_dim]
+            if self.pad_dim > 0:
+                time_step_input = F.pad(time_step_input, (0, self.pad_dim))  # 填充到 [batch_size, time_steps, padded_feature_dim]
+
+            time_step_embeddings.append(time_step_input.unsqueeze(1))  # [batch_size, 1, padded_feature_dim]
 
         # 将所有时间步的表示拼接成序列
-        sequence_input = torch.cat(time_step_embeddings, dim=1)  # [batch_size, time_steps, time_step_feature_dim]
+        sequence_input = torch.cat(time_step_embeddings, dim=1)  # [batch_size, time_steps, padded_feature_dim]
 
         # 添加位置编码
-        sequence_input = self.positional_encoding(sequence_input)  # [batch_size, time_steps, time_step_feature_dim]
+        sequence_input = self.positional_encoding(sequence_input)  # [batch_size, time_steps, padded_feature_dim]
 
         # 转换形状以适应 Transformer：[seq_len, batch_size, feature_dim]
         sequence_input = sequence_input.transpose(0, 1)  # [time_steps, batch_size, feature_dim]
@@ -248,6 +260,11 @@ class MainModel(nn.Module):
 
         # 通过时间序列 Transformer
         transformer_output = self.time_transformer(sequence_input)  # [time_steps, batch_size, feature_dim]
+
+        # 如果进行了填充，则去掉填充部分
+        if self.pad_dim > 0:
+            transformer_output = transformer_output[:, :, :self.time_step_feature_dim]  # 去除填充，形状为 [time_steps, batch_size, time_step_feature_dim]
+
 
         # 取最后一个时间步的输出作为特征（也可以采用其他聚合方式）
         final_output = transformer_output[-1, :, :]  # [batch_size, feature_dim]

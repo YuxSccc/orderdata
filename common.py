@@ -323,8 +323,8 @@ class GlobalNormalizer:
         min_value, max_value = GlobalNormalizer._find_min_max_nested(df.tolist())
         if min_value is None or max_value is None:
             return None, None
-        min_bias = random.random() * 0.1 + 0.2
-        max_bias = random.random() * 0.1 + 0.2
+        min_bias = random.random() * 0.1
+        max_bias = random.random() * 0.1
         min_value = min_value * (1 - min_bias)
         max_value = max_value * (1 + max_bias)
         return min_value, max_value
@@ -411,23 +411,23 @@ class Calculator(ABC):
     def calc_signal(self) -> list[Signal]:
         pass
 
-    @abstractmethod
     @staticmethod
+    @abstractmethod
     def get_feature_column_name() -> list[str]:
         pass
 
-    @abstractmethod
     @staticmethod
+    @abstractmethod
     def get_feature_name() -> str:
         pass
 
-    @abstractmethod
     @staticmethod
+    @abstractmethod
     def get_signal_type() -> type[Signal]:
         pass
 
-    @abstractmethod
     @staticmethod
+    @abstractmethod
     def get_normalize_type() -> list[int]:
         pass
 

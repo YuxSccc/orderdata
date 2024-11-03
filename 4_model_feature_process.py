@@ -61,12 +61,6 @@ class FeatureModule(nn.Module):
         return feature_vector
 
 filename = ['BTCUSDT-trades-2024-10-01']
-output_bar_parquet_path = './model_feature/output_bar.parquet'
-output_onehot_parquet_path = './model_feature/output_onehot.parquet'
-output_price_level_parquet_path = './model_feature/output_price_level.parquet'
-output_bar_feature_parquet_path = './model_feature/output_bar_feature.parquet'
-output_target_parquet_path = './model_feature/output_target.parquet'
-output_flow_parquet_path = './model_feature/output_flow.parquet'
 
 first_chunk_dict = {}
 
@@ -208,6 +202,7 @@ def generate_feature_df(indicator: Calculator, bars: list[FootprintBar], ticks: 
     else:
         raise ValueError(f"Indicator {indicator_instance.__name__} is not supported")
 
+# flow[seqlen * i: seqlen * (i + 1)] for bar[i]
 def generate_flow_feature(indicator: Calculator, bars: list[FootprintBar], ticks: list[Tick]=None, price_to_price_level_idx: list[dict]=None):
     ts_to_idx = {}
     for i in range(len(bars)):
@@ -234,6 +229,38 @@ def generate_flow_feature(indicator: Calculator, bars: list[FootprintBar], ticks
                 bars_feature_list.append(signal_feature_list)
                 
     return pd.DataFrame({f"{feature_prefix}_{feature_name}_flow": bars_feature_list})
+
+# 获取所有列名前缀
+def get_column_prefixes(df):
+    prefixes = {}
+    for col in df.columns:
+        name, feature_name, _ = col.split('_', 2)
+        prefix = name + "_" + feature_name
+        if prefix in prefixes:
+            prefixes[prefix].append(col)
+        else:
+            prefixes[prefix] = [col]
+    return prefixes
+
+# 聚合函数
+def aggregate_by_prefix(df):
+    prefixes = get_column_prefixes(df)
+    for prefix, cols in prefixes.items():
+        def merge_row(row):
+            if row[cols[0]] is None:
+                assert all(row[col] is None for col in cols), \
+                    f"All columns in {prefix} must be None if the first column is None"
+                return None
+            max_length = max(len(row[col]) for col in cols)
+            combined_row = []
+            for i in range(max_length):
+                combined_row.append([row[col][i] if i < len(row[col]) else None for col in cols])
+            return combined_row
+        
+        # 创建聚合列并删除原始列
+        df[prefix] = df.apply(merge_row, axis=1)
+        df.drop(columns=cols, inplace=True)
+    return df
 
 def generate_target_feature(bars: list[FootprintBar], step1_size=5, step2_size=10, step_5_target=0.003, step_10_target=0.005):
     df = pd.DataFrame(index=range(len(bars)), columns=["reach_5_steps_high", "reach_10_steps_high", "reach_5_steps_low", "reach_10_steps_low"])
@@ -342,10 +369,12 @@ def pack_price_level_feature(price_level_feature_df: pd.DataFrame, onehot_featur
     feature_columns = [col for col in price_level_feature_df.columns if col != 'timestamp']
     onehot_columns = onehot_feature_df.columns.tolist()
     # 按时间顺序处理每个组
-    for timestamp, group in sorted(grouped, key=lambda x: (x['timestamp'], x['idx'])):
+    idx = -1
+    for timestamp, group in sorted(grouped, key=lambda x: (x[0], x[1]['idx'])):
+        idx += 1
         step_features = group[feature_columns].values
         # 获取当前时间步的onehot特征
-        current_onehot = onehot_feature_df.loc[group.index[0]]  # 获取对应行的onehot特征
+        current_onehot = onehot_feature_df.loc[idx]  # 获取对应行的onehot特征
         
         # 将字符串形式的列表转换为实际的数组
         onehot_arrays = [current_onehot[col] for col in onehot_columns]
@@ -375,7 +404,7 @@ def pack_price_level_feature(price_level_feature_df: pd.DataFrame, onehot_featur
         )
     }
 
-def combine_feature_df(feature_df: pd.DataFrame, price_level_feature_df: pd.DataFrame, onehot_feature_df: pd.DataFrame, embedding_config: dict):
+def combine_feature_df(feature_df: pd.DataFrame, bar_feature_df: pd.DataFrame, price_level_feature_df: pd.DataFrame, onehot_feature_df: pd.DataFrame, embedding_config: dict):
     """
     将特征DataFrame转换为训练所需的格式
 
@@ -403,7 +432,7 @@ def combine_feature_df(feature_df: pd.DataFrame, price_level_feature_df: pd.Data
 
     # 处理price level特征
     price_level_features = pack_price_level_feature(price_level_feature_df, onehot_feature_df)
-    
+
     # 按时间步处理特征
     for time_step in range(num_time_steps):
         step_features = {}
@@ -417,6 +446,13 @@ def combine_feature_df(feature_df: pd.DataFrame, price_level_feature_df: pd.Data
             if key not in feature_groups:
                 feature_groups[key] = []
             feature_groups[key].append((param_id, col))
+
+        # non_embedding_features = []
+        # for key, columns in feature_groups.items():
+        #     name, feature_name = key.split('_', 1)
+        #     if feature_name not in embedding_config:
+        #         non_embedding_features.append(key)
+        # print(non_embedding_features)
 
         # 处理每个特征组
         for key, columns in feature_groups.items():
@@ -446,7 +482,7 @@ def combine_feature_df(feature_df: pd.DataFrame, price_level_feature_df: pd.Data
                     params = np.array(param_values).reshape(num_features, param_dim)
                     
                     if name not in step_features:
-                        step_features[name] = (params, categories)
+                        step_features[name + '_' + feature_name] = (params, categories)
             else:
                 # 不在embedding_config中的特征添加到other_features
                 for param_id, col in columns:
@@ -456,15 +492,27 @@ def combine_feature_df(feature_df: pd.DataFrame, price_level_feature_df: pd.Data
         
         # 添加price level特征
         if price_level_features:
-            step_features['main_PriceLevels'] = price_level_features['main_PriceLevels'][0][time_step]
+            step_features['main_PriceLevels'] = [price_level_features['main_PriceLevels'][0][time_step], None]
         
         feature_data.append(step_features)
         other_features.append(np.array(step_other_features))
     
-    return {
-        'other_features': other_features,
-        'feature_data': feature_data
-    }
+    bar_copy = bar_feature_df.copy()
+    bar_copy.drop(columns=["timestamp"], inplace=True)
+    number_feature_df = pd.DataFrame([arr.tolist() for arr in other_features])
+    number_feature_df = pd.concat([bar_copy, number_feature_df], axis=1)
+
+    flat_data = []
+    for entry in feature_data:
+        flat_entry = {}
+        for key, [arr1, arr2] in entry.items():
+            flat_entry[f"{key}_params"] = list(arr1)
+            flat_entry[f"{key}_categories"] = list(arr2) if arr2 is not None else None
+        flat_data.append(flat_entry)
+
+    event_data_df = pd.DataFrame(flat_data, dtype="object")
+    event_data_df = event_data_df.where(pd.notnull(event_data_df), None)
+    return number_feature_df, event_data_df
 
 if __name__ == "__main__":
     for file in filename:
@@ -472,7 +520,7 @@ if __name__ == "__main__":
         target_feature_df = generate_target_feature(bars)
         pd.set_option('display.max_rows', None)
         ticks = get_ticks(file)
-        global_feature_df = pd.DataFrame()
+        event_feature_df = pd.DataFrame()
 
         bar_feature_df = generate_bar_feature(bars)
         price_level_features_df, price_to_price_level_idx = generate_price_level_feature(bars)
@@ -509,26 +557,22 @@ if __name__ == "__main__":
             else:
                 feature_df, onehot_feature_df = generate_feature_df(indicator, bars, ticks, price_to_price_level_idx)
                 feature_df = indicator["indicator"].normalize_feature(feature_df.iloc[:, 0], indicator['name'] + "_" + feature_name, normalizer)
-                global_feature_df = pd.concat([global_feature_df, feature_df], axis=1)
+                event_feature_df = pd.concat([event_feature_df, feature_df], axis=1)
                 if onehot_feature_df is not None:
                     global_onehot_feature_df = pd.concat([global_onehot_feature_df, onehot_feature_df], axis=1)
 
+        aggregate_by_prefix(global_flow_feature_df)
+
         bar_feature_df = do_normalize_for_bar_features(bar_feature_df, normalizer)
         price_level_features_df = do_normalize_for_price_level_features(price_level_features_df, normalizer)
-        # print(global_feature_df)
-        # print(global_onehot_feature_df)
-        # print(sum_feature_size)
-        # print(bar_feature_df.shape)
-        # print(price_level_features_df.shape)
-        global_onehot_feature_df.to_html("output_onehot.html")
-        global_feature_df.to_html("output_feature.html")
-        write_to_parquet(global_feature_df, output_bar_feature_parquet_path)
-        # write_to_parquet(global_onehot_feature_df, output_onehot_parquet_path)
-        write_to_parquet(global_flow_feature_df, output_flow_parquet_path)
-        # print(global_flow_feature_df)
-        price_level_features_df.to_html("output_price_level.html")
-        write_to_parquet(price_level_features_df, output_price_level_parquet_path)
-        bar_feature_df.to_html("output_bar.html")
-        write_to_parquet(bar_feature_df, output_bar_parquet_path)
-        target_feature_df.to_html("output_target.html")
+
+        number_feature_df, event_data_df = combine_feature_df(event_feature_df, bar_feature_df, price_level_features_df, global_onehot_feature_df, embedding_config)
+        write_to_parquet(number_feature_df, output_number_parquet_path)
+        write_to_parquet(event_data_df, output_event_parquet_path)
         write_to_parquet(target_feature_df, output_target_parquet_path)
+        write_to_parquet(global_flow_feature_df, output_flow_parquet_path)
+        number_feature_df.to_html("output_number.html")
+        event_data_df.to_html("output_event.html")
+        target_feature_df.to_html("output_target.html")
+        global_flow_feature_df.to_html("output_flow.html")
+
