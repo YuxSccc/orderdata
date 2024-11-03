@@ -365,13 +365,17 @@ class GlobalNormalizer:
 
         if min_value is None or max_value is None or min_value == max_value:
             return df
+        
+        max_abs = max(abs(min_value), abs(max_value))
+        min_value = -max_abs
+        max_value = max_abs
         normalized_series = sub_df.apply(lambda x: GlobalNormalizer._normalize_value(x, lambda x: 2 * (x - min_value) / (max_value - min_value) - 1))
         normalized_df = df.copy()
         normalized_df.loc[start_row:end_row] = normalized_series
         return normalized_df
 
     @staticmethod
-    def log_normalize_with_rows(series: pd.Series, start_row: Optional[int] = None, end_row: Optional[int] = None) -> pd.Series:
+    def log_normalize(series: pd.Series, start_row: Optional[int] = None, end_row: Optional[int] = None) -> pd.Series:
         if start_row is None:
             start_row = 0
         if end_row is None:
@@ -408,19 +412,23 @@ class Calculator(ABC):
         pass
 
     @abstractmethod
-    def get_feature_column_name(self) -> list[str]:
+    @staticmethod
+    def get_feature_column_name() -> list[str]:
         pass
 
     @abstractmethod
-    def get_feature_name(self) -> str:
+    @staticmethod
+    def get_feature_name() -> str:
         pass
 
     @abstractmethod
-    def get_signal_type(self) -> type[Signal]:
+    @staticmethod
+    def get_signal_type() -> type[Signal]:
         pass
 
     @abstractmethod
-    def get_normalize_type(self) -> list[int]:
+    @staticmethod
+    def get_normalize_type() -> list[int]:
         pass
 
     def normalize_feature(self, feature: pd.Series, name: str, normalizer: GlobalNormalizer) -> pd.DataFrame:
@@ -449,7 +457,7 @@ class Calculator(ABC):
         elif normalize_type == Calculator.MIN_MAX_NORMALIZE_FOR_PRICE:
             return normalizer.min_max_normalize_for_price(data)
         elif normalize_type == Calculator.LOG_NORMALIZE:
-            return GlobalNormalizer.log_normalize_with_rows(data)
+            return GlobalNormalizer.log_normalize(data)
         elif normalize_type == Calculator.CUSTOM_NORMALIZE:
             return self.do_custom_normalize(data, idx, normalizer)
         else:

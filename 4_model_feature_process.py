@@ -82,7 +82,7 @@ def write_to_parquet(df: pd.DataFrame, filename: str):
 
 def generate_bar_feature(bars: list[FootprintBar]):
     bar_feature_df = pd.DataFrame()
-    bar_column_name = ["timestamp", "open", "high", "low", "close", "volume", "delta", "trade_count"]
+    bar_column_name = ["timestamp", "open", "high", "low", "close", "volume", "delta", "trades_count"]
     bar_feature_list = [[] for _ in range(len(bar_column_name))]
     for i in range(len(bars)):
         bar_feature_list[0].append(bars[i].timestamp)
@@ -184,16 +184,17 @@ def generate_feature_df(indicator: Calculator, bars: list[FootprintBar], ticks: 
             for i in range(len(signal.get_bars())):
                 bars_signal_list[ts_to_idx[signal.get_bars()[i].timestamp]].append((i, signal))
         # onehot feature
-        bar_onehot_feature_list = []
-        for bar_idx, signals in enumerate(bars_signal_list):
-            bar_onehot_feature = [[0] * indicator_instance.get_max_color_size()] * len(bars[bar_idx].priceLevels)
-            for signal_bar_idx, signal in signals:
-                color_tensor = signal.get_color_tensor()[signal_bar_idx]
-                for color_set in color_tensor:
-                    assert len(color_set) <= 1
-                    for color in color_set:
-                        bar_onehot_feature[color] = 1
-            bar_onehot_feature_list.append(bar_onehot_feature)
+        if indicator_instance.get_max_color_size() != 0:
+            bar_onehot_feature_list = []
+            for bar_idx, signals in enumerate(bars_signal_list):
+                bar_onehot_feature = [0 * indicator_instance.get_max_color_size()] * len(bars[bar_idx].priceLevels)
+                for signal_bar_idx, signal in signals:
+                    color_tensor = signal.get_color_tensor()[signal_bar_idx]
+                    for color_set in color_tensor:
+                        assert len(color_set) <= 1
+                        for color in color_set:
+                            bar_onehot_feature[color] = 1
+                bar_onehot_feature_list.append(bar_onehot_feature)
         # signal feature
         bars_feature_list = []
         for bar_idx, signals in enumerate(bars_signal_list):
@@ -202,7 +203,7 @@ def generate_feature_df(indicator: Calculator, bars: list[FootprintBar], ticks: 
                 signal_feature_list.append(signal.get_additional_info())
             bars_feature_list.append(signal_feature_list)
         return pd.DataFrame({f"{feature_prefix}_{feature_name}": bars_feature_list}), \
-            pd.DataFrame({f"{feature_prefix}_{feature_name}": bar_onehot_feature_list})
+            pd.DataFrame({f"{feature_prefix}_{feature_name}": bar_onehot_feature_list}) if indicator_instance.get_max_color_size() != 0 else None
 
     else:
         raise ValueError(f"Indicator {indicator_instance.__name__} is not supported")
@@ -236,10 +237,13 @@ def generate_flow_feature(indicator: Calculator, bars: list[FootprintBar], ticks
 
 def generate_target_feature(bars: list[FootprintBar], step1_size=5, step2_size=10, step_5_target=0.003, step_10_target=0.005):
     df = pd.DataFrame(index=range(len(bars)), columns=["reach_5_steps_high", "reach_10_steps_high", "reach_5_steps_low", "reach_10_steps_low"])
-    df.infer_objects(copy=False).fillna(0, inplace=True)
     n = len(bars)
     for i in range(n):
         current_price = bars[i].close
+        df.loc[i, 'reach_5_steps_high'] = 0
+        df.loc[i, 'reach_10_steps_high'] = 0
+        df.loc[i, 'reach_5_steps_low'] = 0
+        df.loc[i, 'reach_10_steps_low'] = 0
         for j in range(1, step1_size + 1):
             if i + j >= n:
                 break
@@ -304,6 +308,164 @@ def generate_target_feature(bars: list[FootprintBar], step1_size=5, step2_size=1
 #     plt.legend()
 #     plt.savefig("output.png")
 
+def do_normalize_for_bar_features(bar_feature_df: pd.DataFrame, normalizer: GlobalNormalizer):
+    bar_feature_df = bar_feature_df.astype({"trades_count": float})
+    bar_feature_df.loc[:, "open"] = normalizer.min_max_normalize_for_price(bar_feature_df.loc[:, "open"])
+    bar_feature_df.loc[:, "high"] = normalizer.min_max_normalize_for_price(bar_feature_df.loc[:, "high"])
+    bar_feature_df.loc[:, "low"] = normalizer.min_max_normalize_for_price(bar_feature_df.loc[:, "low"])
+    bar_feature_df.loc[:, "close"] = normalizer.min_max_normalize_for_price(bar_feature_df.loc[:, "close"])
+    bar_feature_df.loc[:, "volume"] = normalizer.log_normalize(bar_feature_df.loc[:, "volume"])
+    bar_feature_df.loc[:, "delta"] = normalizer.min_max_normalize_with_negative(bar_feature_df.loc[:, "delta"])
+    bar_feature_df.loc[:, "trades_count"] = normalizer.min_max_normalize(bar_feature_df.loc[:, "trades_count"])
+    return bar_feature_df
+
+def do_normalize_for_price_level_features(price_level_feature_df: pd.DataFrame, normalizer: GlobalNormalizer):
+    price_level_feature_df = price_level_feature_df.astype({"bid_count": float, 'ask_count': float, "trades_count": float, "idx": float})
+    price_level_feature_df.loc[:, "price"] = normalizer.min_max_normalize_for_price(price_level_feature_df.loc[:, "price"])
+    price_level_feature_df.loc[:, "bid_size"] = normalizer.min_max_normalize(price_level_feature_df.loc[:, "bid_size"])
+    price_level_feature_df.loc[:, "bid_count"] = normalizer.min_max_normalize(price_level_feature_df.loc[:, "bid_count"])
+    price_level_feature_df.loc[:, "ask_size"] = normalizer.min_max_normalize(price_level_feature_df.loc[:, "ask_size"])
+    price_level_feature_df.loc[:, "ask_count"] = normalizer.min_max_normalize(price_level_feature_df.loc[:, "ask_count"])
+    price_level_feature_df.loc[:, "delta"] = normalizer.min_max_normalize_with_negative(price_level_feature_df.loc[:, "delta"])
+    price_level_feature_df.loc[:, "trades_count"] = normalizer.min_max_normalize(price_level_feature_df.loc[:, "trades_count"])
+    price_level_feature_df.loc[:, "volume"] = normalizer.log_normalize(price_level_feature_df.loc[:, "volume"])
+    price_level_feature_df.loc[:, "idx"] = normalizer.min_max_normalize(price_level_feature_df.loc[:, "idx"])
+    return price_level_feature_df
+
+def pack_price_level_feature(price_level_feature_df: pd.DataFrame, onehot_feature_df: pd.DataFrame):
+    grouped = price_level_feature_df.groupby('timestamp')
+    
+    # 存储每个时间步的特征参数
+    feature_params = []
+    
+    # 获取特征列名（除timestamp外的所有列）
+    feature_columns = [col for col in price_level_feature_df.columns if col != 'timestamp']
+    onehot_columns = onehot_feature_df.columns.tolist()
+    # 按时间顺序处理每个组
+    for timestamp, group in sorted(grouped, key=lambda x: (x['timestamp'], x['idx'])):
+        step_features = group[feature_columns].values
+        # 获取当前时间步的onehot特征
+        current_onehot = onehot_feature_df.loc[group.index[0]]  # 获取对应行的onehot特征
+        
+        # 将字符串形式的列表转换为实际的数组
+        onehot_arrays = [current_onehot[col] for col in onehot_columns]
+        num_price_levels = len(step_features)
+        for arr in onehot_arrays:
+            assert len(arr) == num_price_levels, \
+                f"Onehot array length ({len(arr)}) doesn't match price level count ({num_price_levels})"
+        
+        
+        # 构建完整的特征矩阵
+        full_features = np.zeros((num_price_levels, len(feature_columns) + len(onehot_columns)))
+        
+        # 填充原始特征
+        full_features[:, :len(feature_columns)] = step_features
+        
+        # 填充onehot特征
+        for i, onehot_array in enumerate(onehot_arrays):
+            full_features[:, len(feature_columns) + i] = onehot_array
+        
+        feature_params.append(full_features)
+    
+    # 返回打包后的特征字典
+    return {
+        'main_PriceLevels': (
+            feature_params,  # list[time_steps][num_features, param_dim]
+            None
+        )
+    }
+
+def combine_feature_df(feature_df: pd.DataFrame, price_level_feature_df: pd.DataFrame, onehot_feature_df: pd.DataFrame, embedding_config: dict):
+    """
+    将特征DataFrame转换为训练所需的格式
+
+    Args:
+        feature_df: DataFrame，列名格式为 {name}_{feature_name}_{param_id}
+        price_level_feature_df: DataFrame，price level特征
+        onehot_feature_df: DataFrame，onehot特征
+        embedding_config: dict，特征嵌入配置
+
+    Returns:
+        dict: {
+            'other_features': list[time_steps][num_samples, other_feature_dim],
+            'feature_data': list[time_steps][dict] 每个dict的格式为:
+                {
+                    'feature_name': (
+                        feature_params: list[num_samples][num_features, param_dim],
+                        feature_categories: list[num_samples][num_features] or None
+                    )
+                }
+        }
+    """
+    num_time_steps = len(feature_df)
+    feature_data = []
+    other_features = []
+
+    # 处理price level特征
+    price_level_features = pack_price_level_feature(price_level_feature_df, onehot_feature_df)
+    
+    # 按时间步处理特征
+    for time_step in range(num_time_steps):
+        step_features = {}
+        step_other_features = []
+        
+        # 按feature_name分组处理列
+        feature_groups = {}
+        for col in feature_df.columns:
+            name, feature_name, param_id = col.split('_', 2)
+            key = f"{name}_{feature_name}"
+            if key not in feature_groups:
+                feature_groups[key] = []
+            feature_groups[key].append((param_id, col))
+
+        # 处理每个特征组
+        for key, columns in feature_groups.items():
+            name, feature_name = key.split('_', 1)
+            
+            # 检查是否在embedding_config中
+            if feature_name in embedding_config:
+                config = embedding_config[feature_name]
+                param_values = []
+                categories = None
+                
+                # 获取该时间步的所有参数值
+                for param_id, col in sorted(columns, key=lambda x: int(x[0].split('_')[-1])):
+                    value = feature_df.iloc[time_step][col]
+                    if value is not None and not (isinstance(value, list) and value[0] is None):
+                        param_values.extend(value if isinstance(value, list) else [value])
+                
+                if param_values:
+                    # 如果有类别特征，提取第一列作为类别
+                    if config['num_categories'] > 0:
+                        categories = param_values[::len(columns)]  # 每组参数的第一个值作为类别
+                        param_values = [v for i, v in enumerate(param_values) if i % len(columns) != 0]  # 剩余值作为参数
+                    
+                    # 重塑参数数组
+                    num_features = len(param_values) // (len(columns) - (1 if categories else 0))
+                    param_dim = len(columns) - (1 if categories else 0)
+                    params = np.array(param_values).reshape(num_features, param_dim)
+                    
+                    if name not in step_features:
+                        step_features[name] = (params, categories)
+            else:
+                # 不在embedding_config中的特征添加到other_features
+                for param_id, col in columns:
+                    value = feature_df.iloc[time_step][col]
+                    if value is not None and not (isinstance(value, list) and value[0] is None):
+                        step_other_features.extend(value if isinstance(value, list) else [value])
+        
+        # 添加price level特征
+        if price_level_features:
+            step_features['main_PriceLevels'] = price_level_features['main_PriceLevels'][0][time_step]
+        
+        feature_data.append(step_features)
+        other_features.append(np.array(step_other_features))
+    
+    return {
+        'other_features': other_features,
+        'feature_data': feature_data
+    }
+
 if __name__ == "__main__":
     for file in filename:
         bars = get_bars(file)
@@ -350,16 +512,23 @@ if __name__ == "__main__":
                 global_feature_df = pd.concat([global_feature_df, feature_df], axis=1)
                 if onehot_feature_df is not None:
                     global_onehot_feature_df = pd.concat([global_onehot_feature_df, onehot_feature_df], axis=1)
+
+        bar_feature_df = do_normalize_for_bar_features(bar_feature_df, normalizer)
+        price_level_features_df = do_normalize_for_price_level_features(price_level_features_df, normalizer)
         # print(global_feature_df)
         # print(global_onehot_feature_df)
         # print(sum_feature_size)
         # print(bar_feature_df.shape)
         # print(price_level_features_df.shape)
+        global_onehot_feature_df.to_html("output_onehot.html")
+        global_feature_df.to_html("output_feature.html")
         write_to_parquet(global_feature_df, output_bar_feature_parquet_path)
-        write_to_parquet(global_onehot_feature_df, output_onehot_parquet_path)
+        # write_to_parquet(global_onehot_feature_df, output_onehot_parquet_path)
         write_to_parquet(global_flow_feature_df, output_flow_parquet_path)
-        print(global_flow_feature_df)
-        global_flow_feature_df.to_html("output.html")
+        # print(global_flow_feature_df)
+        price_level_features_df.to_html("output_price_level.html")
         write_to_parquet(price_level_features_df, output_price_level_parquet_path)
+        bar_feature_df.to_html("output_bar.html")
         write_to_parquet(bar_feature_df, output_bar_parquet_path)
+        target_feature_df.to_html("output_target.html")
         write_to_parquet(target_feature_df, output_target_parquet_path)

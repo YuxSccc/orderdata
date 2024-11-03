@@ -19,7 +19,7 @@ class PositionalEncoding(nn.Module):
         return x
 
 class FeatureEmbedding(nn.Module):
-    def __init__(self, param_dim, embedding_dim, max_feature_length, num_categories, use_attention=True):
+    def __init__(self, param_dim, embedding_dim, category_dim, max_feature_length, num_categories, use_attention=True):
         """
         初始化特征嵌入层。
 
@@ -34,24 +34,26 @@ class FeatureEmbedding(nn.Module):
         super(FeatureEmbedding, self).__init__()
         self.param_dim = param_dim
         self.embedding_dim = embedding_dim
+        self.category_dim = category_dim
         self.max_feature_length = max_feature_length
         self.num_categories = num_categories
         self.use_attention = use_attention
 
         if num_categories > 1:
             self.use_category_embedding = True
-            self.category_embedding = nn.Embedding(num_categories, embedding_dim)
+            self.category_embedding = nn.Embedding(num_categories, category_dim)
         else:
             self.use_category_embedding = False
+            category_dim = 0
 
         self.param_embedding = nn.Linear(param_dim, embedding_dim)
-
+        self.combined_embedding_dim = embedding_dim + category_dim
         # 位置编码
-        self.positional_encoding = PositionalEncoding(embedding_dim, max_len=max_feature_length)
+        self.positional_encoding = PositionalEncoding(self.combined_embedding_dim, max_len=max_feature_length)
 
         if self.use_attention:
             # 使用 TransformerEncoder 作为注意力机制
-            encoder_layer = nn.TransformerEncoderLayer(d_model=embedding_dim, nhead=4)
+            encoder_layer = nn.TransformerEncoderLayer(d_model=self.combined_embedding_dim, nhead=4)
             self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
         else:
             # 如果不使用注意力机制，可以在这里添加其他处理方式
@@ -85,10 +87,10 @@ class FeatureEmbedding(nn.Module):
         if self.use_category_embedding:
             assert feature_categories is not None, "feature_categories must be provided when num_categories > 1"
             feature_categories_tensor = torch.tensor(feature_categories, dtype=torch.long, device=device)  # [num_features]
-            category_embeds = self.category_embedding(feature_categories_tensor)  # [num_features, embedding_dim]
-            embedded_features = category_embeds + param_embeds  # [num_features, embedding_dim]
+            category_embeds = self.category_embedding(feature_categories_tensor)  # [num_features, category_dim]
+            embedded_features = category_embeds + param_embeds  # [num_features, combined_embedding_dim]
         else:
-            embedded_features = param_embeds  # [num_features, embedding_dim]
+            embedded_features = param_embeds  # [num_features, combined_embedding_dim]
 
         # 创建掩码：填充位置为 True，有效数据为 False
         mask = torch.ones(self.max_feature_length, dtype=torch.bool, device=device)  # 全部初始化为填充
@@ -97,48 +99,48 @@ class FeatureEmbedding(nn.Module):
         # 填充或截断 embedded_features 到 max_feature_length
         if num_features < self.max_feature_length:
             padding_length = self.max_feature_length - num_features
-            padding_embeds = torch.zeros(padding_length, self.embedding_dim, device=device)
+            padding_embeds = torch.zeros(padding_length, self.combined_embedding_dim, device=device)
             embedded_features = torch.cat([embedded_features, padding_embeds], dim=0)  # [max_feature_length, embedding_dim]
         else:
             embedded_features = embedded_features[:self.max_feature_length, :]  # [max_feature_length, embedding_dim]
             mask = mask[:self.max_feature_length]
 
         # 添加批次维度
-        embedded_features = embedded_features.unsqueeze(0)  # [1, max_feature_length, embedding_dim]
+        embedded_features = embedded_features.unsqueeze(0)  # [1, max_feature_length, combined_embedding_dim]
         mask = mask.unsqueeze(0)  # [1, max_feature_length]
 
         # 添加位置编码
-        embedded_features = self.positional_encoding(embedded_features)  # [1, max_feature_length, embedding_dim]
+        embedded_features = self.positional_encoding(embedded_features)  # [1, max_feature_length, combined_embedding_dim]
 
         if self.use_attention:
             # 转换形状以适应 Transformer：[seq_len, batch_size, embedding_dim]
-            embedded_features = embedded_features.transpose(0, 1)  # [max_feature_length, 1, embedding_dim]
+            embedded_features = embedded_features.transpose(0, 1)  # [max_feature_length, 1, combined_embedding_dim]
 
             # Transformer 期望的 src_key_padding_mask 形状为 [batch_size, seq_len]
             # 我们需要传递 mask，填充位置为 True，有效位置为 False
             transformer_mask = mask  # [1, max_feature_length]
 
             # 通过 TransformerEncoder
-            transformer_output = self.transformer_encoder(embedded_features, src_key_padding_mask=transformer_mask)  # [max_feature_length, 1, embedding_dim]
+            transformer_output = self.transformer_encoder(embedded_features, src_key_padding_mask=transformer_mask)  # [max_feature_length, 1, combined_embedding_dim]
 
             # 转换回 [batch_size, seq_len, embedding_dim]
-            transformer_output = transformer_output.transpose(0, 1)  # [1, max_feature_length, embedding_dim]
+            transformer_output = transformer_output.transpose(0, 1)  # [1, max_feature_length, combined_embedding_dim]
 
             # 应用掩码到 transformer_output
             masked_output = transformer_output * (~mask.unsqueeze(2)).float()  # 填充位置置零
 
             # 聚合有效位置的输出（例如，取平均值）
-            sum_embeddings = masked_output.sum(dim=1)  # [1, embedding_dim]
+            sum_embeddings = masked_output.sum(dim=1)  # [1, combined_embedding_dim]
             valid_token_count = (~mask).sum(dim=1, keepdim=True).float()  # [1, 1]
-            aggregated_feature = sum_embeddings / (valid_token_count + 1e-8)  # [1, embedding_dim]
+            aggregated_feature = sum_embeddings / (valid_token_count + 1e-8)  # [1, combined_embedding_dim]
         else:
             # 如果不使用注意力机制，可以对嵌入特征进行其他聚合
             masked_embeddings = embedded_features * (~mask.unsqueeze(2)).float()
-            sum_embeddings = masked_embeddings.sum(dim=1)  # [1, embedding_dim]
+            sum_embeddings = masked_embeddings.sum(dim=1)  # [1, combined_embedding_dim]
             valid_token_count = (~mask).sum(dim=1, keepdim=True).float()
-            aggregated_feature = sum_embeddings / (valid_token_count + 1e-8)  # [1, embedding_dim]
+            aggregated_feature = sum_embeddings / (valid_token_count + 1e-8)  # [1, combined_embedding_dim]
 
-        return aggregated_feature  # [1, embedding_dim]
+        return aggregated_feature  # [1, combined_embedding_dim]
 
 
 class MainModel(nn.Module):
@@ -151,6 +153,7 @@ class MainModel(nn.Module):
           - 'param_dim': 特征参数维度。
           - 'embedding_dim': 嵌入维度。
           - 'max_feature_length': 最大特征长度。
+          - 'category_dim': 类别维度。
           - 'num_categories': 类别数量。
           - 'use_attention': 是否使用注意力机制（bool）
         - total_time_steps (int): 总的时间步数，即时间序列的长度。
@@ -164,6 +167,7 @@ class MainModel(nn.Module):
             self.feature_embeddings[feature_name] = FeatureEmbedding(
                 param_dim=config['param_dim'],
                 embedding_dim=config['embedding_dim'],
+                category_dim=config['category_dim'],
                 max_feature_length=config['max_feature_length'],
                 num_categories=config['num_categories'],
                 use_attention=config.get('use_attention', True)
