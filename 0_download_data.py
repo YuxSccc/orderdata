@@ -12,7 +12,7 @@ def download_data(year, month, path_prefix):
     
     # 检查文件是否已存在
     expected_csv = f"BTCUSDT-trades-{year_str}-{month_str}.csv"
-    if os.path.exists(f"{path_prefix}/rawdata/{expected_csv}"):
+    if os.path.exists(f"{path_prefix}/unsorted_rawdata/{expected_csv}"):
         print(f"Data for {year_str}-{month_str} already exists, skipping...")
         return True
 
@@ -20,7 +20,7 @@ def download_data(year, month, path_prefix):
     try:
         url = f"https://data.binance.vision/data/futures/um/monthly/trades/BTCUSDT/BTCUSDT-trades-{year_str}-{month_str}.zip"
         response = requests.get(url)
-        zip_path = f"{path_prefix}/rawdata/temp_{year_str}-{month_str}.zip"
+        zip_path = f"{path_prefix}/unsorted_rawdata/temp_{year_str}-{month_str}.zip"
         
         # 保存zip文件
         with open(zip_path, "wb") as f:
@@ -28,7 +28,7 @@ def download_data(year, month, path_prefix):
         
         # 解压文件
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(f'{path_prefix}/rawdata')
+            zip_ref.extractall(f'{path_prefix}/unsorted_rawdata')
         
         # 删除zip文件
         os.remove(zip_path)
@@ -55,8 +55,8 @@ def generate_date_range(start_year, start_month, end_year, end_month):
 def parallel_download(start_year, start_month, end_year, end_month, max_workers=4):
     """并行下载和解压数据"""
     path_prefix = '/mnt/e/orderdata/binance'
-    if not os.path.exists(f'{path_prefix}/rawdata'):
-        os.makedirs(f'{path_prefix}/rawdata')
+    if not os.path.exists(f'{path_prefix}/unsorted_rawdata'):
+        os.makedirs(f'{path_prefix}/unsorted_rawdata')
 
     # 生成所有需要下载的日期
     dates = generate_date_range(start_year, start_month, end_year, end_month)

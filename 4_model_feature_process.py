@@ -59,7 +59,7 @@ def main():
     logging.info(f"Found {total_files} files to process")
     
     # 获取CPU核心数，留一个核心给系统
-    num_processes = max(1, 4)
+    num_processes = 2
     logging.info(f"Using {num_processes} processes")
     
     # 创建进程池

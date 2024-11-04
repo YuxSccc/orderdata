@@ -23,6 +23,7 @@ BTC_scale = 100
 BTC_volumePrecision = 2
 BTC_pricePrecision = 1
 
+worker_count = 2
 path_prefix = '/mnt/e/orderdata/binance'
 
 def has_header(file_path):
@@ -115,7 +116,7 @@ def main():
     logging.info(f"Found {total_files} files to process")
     
     # 获取CPU核心数，留一个核心给系统
-    max_workers = max(1, os.cpu_count() - 1)
+    max_workers = worker_count
     logging.info(f"Using {max_workers} processes")
     
     # 使用进程池并行处理

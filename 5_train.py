@@ -13,6 +13,7 @@ from config import *
 import torch.nn.functional as F
 import os
 from torchmetrics import AUROC, F1Score
+import random
 
 # 设置日志
 logging.basicConfig(
@@ -173,8 +174,100 @@ class TradingDataset(Dataset):
             'feature_data': feature_data
         }, torch.LongTensor(target)
 
-def train_epoch(model, train_loader, criterion, optimizer, device, scaler, 
-                epoch, checkpoint_path, best_model_path, best_val_loss, patience_counter, scheduler, start_batch, gen):
+def print_model_params(model, prefix=""):
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(f"{prefix}Parameter {name}: {param.shape}")
+
+def get_state_hash(model, optimizer):
+    """计算模型参数和优化器状态的哈希值"""
+    import hashlib
+    import json
+    
+    def tensor_to_list(tensor):
+        """将tensor转换为可哈希的形式"""
+        if torch.is_tensor(tensor):
+            return tensor.detach().cpu().numpy().tolist()
+        return tensor
+
+    def get_state_dict(obj):
+        """获取状态字典的可哈希形式"""
+        if isinstance(obj, dict):
+            return {str(k): get_state_dict(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [get_state_dict(x) for x in obj]
+        elif torch.is_tensor(obj):
+            return tensor_to_list(obj)
+        return obj
+
+    # 获取模型状态
+    model_state = get_state_dict(model.state_dict())
+    
+    # 获取优化器状态
+    optimizer_state = {
+        'param_groups': get_state_dict(optimizer.state_dict()['param_groups']),
+        'state': get_state_dict(optimizer.state_dict()['state'])
+    }
+    
+    # 计算哈希值
+    model_hash = hashlib.sha256(json.dumps(model_state, sort_keys=True).encode()).hexdigest()
+    optimizer_hash = hashlib.sha256(json.dumps(optimizer_state, sort_keys=True).encode()).hexdigest()
+    
+    return {
+        'model': model_hash,
+        'optimizer': optimizer_hash
+    }
+
+# 在关键点检查状态
+def check_state_consistency(model, optimizer, checkpoint_path, train_dataset):
+    print("\nBefore saving checkpoint:")
+    before_save = get_state_hash(model, optimizer)
+    print(f"Model hash: {before_save['model'][:10]}...")
+    print(f"Optimizer hash: {before_save['optimizer'][:10]}...")
+    
+    # 保存checkpoint
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        # ... 其他状态 ...
+    }, checkpoint_path)
+    
+    print("\nAfter saving, before loading:")
+    after_save = get_state_hash(model, optimizer)
+    print(f"Model hash: {after_save['model'][:10]}...")
+    print(f"Optimizer hash: {after_save['optimizer'][:10]}...")
+    
+    # 加载checkpoint
+    checkpoint = torch.load(checkpoint_path)
+
+    model = MainModel(
+        other_feature_dim=train_dataset.get_number_feature_dim(),
+        feature_configs=get_feature_embedding_config(train_dataset.get_feature_name_list()),
+        total_time_steps=seq_len,
+        output_dim=4
+    ).to('cuda')
+
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    
+    print("\nAfter loading checkpoint:")
+    after_load = get_state_hash(model, optimizer)
+    print(f"Model hash: {after_load['model'][:10]}...")
+    print(f"Optimizer hash: {after_load['optimizer'][:10]}...")
+    
+    # 检查一致性
+    is_model_consistent = (before_save['model'] == after_load['model'])
+    is_optimizer_consistent = (before_save['optimizer'] == after_load['optimizer'])
+    
+    print("\nConsistency check:")
+    print(f"Model state consistent: {is_model_consistent}")
+    print(f"Optimizer state consistent: {is_optimizer_consistent}")
+    
+    return is_model_consistent and is_optimizer_consistent, model, optimizer
+
+def train_epoch(model, train_loader, optimizer, device, scaler, 
+                epoch, checkpoint_path, best_val_loss, patience_counter, scheduler, start_batch, gen, train_dataset):
     model.train()
     total_loss = 0
     correct = torch.zeros(4).to(device)  # 每个任务的正确预测数
@@ -182,25 +275,34 @@ def train_epoch(model, train_loader, criterion, optimizer, device, scaler,
     
     last_print_time = time.time()
     last_checkpoint_time = time.time()
-    checkpoint_interval = 300  # 每300秒（5分钟）保存一次检查点
+    checkpoint_interval = 60  # 每300秒（5分钟）保存一次检查点
 
     for batch_idx, (features, targets) in enumerate(train_loader):
         if batch_idx < start_batch:
             continue
         # 将数据移到GPU
+
+        print(f"\nBatch {batch_idx} data check:")
+        print(f"Features type: {type(features)}")
+        print(f"Other features shape: {features['other_features'].shape}")
+        tensor_bytes = features['other_features'].numpy().tobytes()
+        import hashlib
+        hash_object = hashlib.sha256(tensor_bytes)
+        hash_hex = hash_object.hexdigest()
+        print(f"Other features hash: {hash_hex[:10]}...")
+
         targets = targets.to(device)
         other_features = features['other_features'].to(device)
         feature_data = features['feature_data']
-            
+        
+        # with torch.amp.autocast('cuda'):
+        outputs = model(other_features, feature_data)
+        loss = calculate_multi_task_loss(outputs, targets)
+        wandb.log({"train_loss": loss})
+        
         optimizer.zero_grad()
-        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-            outputs = model(other_features, feature_data)
-            loss = calculate_multi_task_loss(outputs, targets)
-            wandb.log({"train_loss": loss})
-
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        loss.backward()
+        optimizer.step()
         
         total_loss += loss.item()
         # 计算每个任务的准确率
@@ -216,29 +318,42 @@ def train_epoch(model, train_loader, criterion, optimizer, device, scaler,
             logging.info(f'Batch: {batch_idx}/{len(train_loader)}, Loss: {loss.item():.4f}, Acc: {acc_str}')
             last_print_time = time.time()
 
+
         # 定期保存检查点
         if current_time - last_checkpoint_time >= checkpoint_interval:
             batch_progress = batch_idx / len(train_loader)  # 当前epoch的进度
             logging.info(f"Saving checkpoint at epoch {epoch}, batch progress: {batch_progress:.2%}")
             
+            print("\nBefore save checkpoint:")
+            before_save = get_state_hash(model, optimizer)
+            is_consistent, model, optimizer = check_state_consistency(model, optimizer, './checkpoints/aaa.pth', train_dataset)
+
             torch.save({
                 'epoch': epoch,
                 'batch_idx': batch_idx,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
-                'scaler_state_dict': scaler.state_dict(),
+                # 'scaler_state_dict': scaler.state_dict(),
                 'patience_counter': patience_counter,
                 'best_val_loss': best_val_loss,
                 'total_batches': len(train_loader),
                 'gen_state': gen.get_state(),
+                'torch_rng_state': torch.get_rng_state(),
+                'cuda_rng_state': torch.cuda.get_rng_state(),
+                'numpy_rng_state': np.random.get_state(),
+                'python_rng_state': random.getstate(),
             }, checkpoint_path)
             
+            print("\nAfter save checkpoint:")
+            after_save = get_state_hash(model, optimizer)
+
+
             last_checkpoint_time = current_time
 
     # 返回平均损失和每个任务的准确率
     task_accuracies = [100. * c / total for c in correct]
-    return total_loss / len(train_loader), task_accuracies
+    return total_loss / len(train_loader), task_accuracies, model, optimizer
 
 def validate(model, val_loader, criterion, device, scaler, num_tasks):
     model.eval()
@@ -342,6 +457,27 @@ def get_file_list():
     val_file_list = all_files[split_idx:]
     return train_file_list, val_file_list
 
+def check_optimizer_state(optimizer, prefix=""):
+    """检查优化器状态的一致性"""
+    param_shapes = {}
+    state_shapes = {}
+    
+    for i, group in enumerate(optimizer.param_groups):
+        for j, p in enumerate(group['params']):
+            param_shapes[f"param_{i}_{j}"] = p.shape
+            if p in optimizer.state:
+                state = optimizer.state[p]
+                state_shapes[f"param_{i}_{j}"] = {
+                    k: v.shape if torch.is_tensor(v) else v
+                    for k, v in state.items()
+                }
+    return param_shapes, state_shapes
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
 def main():
     # 配置参数
     config = {
@@ -354,7 +490,6 @@ def main():
         # 添加其他配置参数...
     }
     seed = 42  # 固定的随机种子
-    torch.manual_seed(seed)
     # 创建保存目录
     config['save_dir'].mkdir(exist_ok=True)
     scaler = torch.amp.GradScaler()
@@ -364,7 +499,12 @@ def main():
     # 初始化wandb（可选）
     wandb.init(project="trading_model", config=config)
     gen = torch.Generator()
-    gen.manual_seed(seed)  # 固定种子
+
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
     begin_skip = 100
     end_skip = 50
     seq_len = 100
@@ -373,6 +513,8 @@ def main():
     val_file_list = ['output']
     checkpoint_path = config['save_dir'] / 'latest_checkpoint.pth'
     best_model_path = config['save_dir'] / 'best_model.pth'
+
+    # checkpoint_path = config['save_dir'] / 'best_model.pth'
     # 尝试加载最近的检查点
     train_dataset = TradingDataset(train_file_list, seq_len, begin_skip, end_skip)
     val_dataset = TradingDataset(val_file_list, seq_len, begin_skip, end_skip)
@@ -382,24 +524,41 @@ def main():
         total_time_steps=seq_len,
         output_dim=4
     ).to(config['device'])
+
+    # print_model_params(model, prefix="Model Parameters: ")
+
+
     optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5)
     if checkpoint_path.exists():
+        before_save = get_state_hash(model, optimizer)
+
         logging.info(f"Loading checkpoint from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5)
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        scaler.load_state_dict(checkpoint['scaler_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
+        # scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        start_epoch = checkpoint['epoch']
         best_val_loss = checkpoint['best_val_loss']
         patience_counter = checkpoint['patience_counter']
         gen.set_state(checkpoint['gen_state'])
         logging.info(f"Resuming from epoch {start_epoch}")
-        start_batch = checkpoint['batch_idx']
+        if checkpoint['batch_idx'] == -1:
+            start_epoch += 1
+        start_batch = checkpoint['batch_idx'] + 1
         logging.info(f"Resuming from epoch {start_epoch}, batch {start_batch}")
 
+        after_save = get_state_hash(model, optimizer)
+        print("before load ", before_save)
+        print("after load ", after_save)
+
+        torch.set_rng_state(checkpoint['torch_rng_state'])
+        torch.cuda.set_rng_state(checkpoint['cuda_rng_state'])
+        np.random.set_state(checkpoint['numpy_rng_state'])
+        random.setstate(checkpoint['python_rng_state'])
     else:
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5)
         best_val_loss = float('inf')
         patience_counter = 0
         start_epoch = 0
@@ -407,7 +566,10 @@ def main():
     # 创建数据加载器
     # train_file_list, val_file_list = get_file_list()
     
-    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=custom_collate_fn, generator=gen)
+    print(start_epoch, start_batch)
+
+    # print_model_params(model, prefix="Model Parameters: ")
+    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], collate_fn=custom_collate_fn, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], collate_fn=custom_collate_fn)
 
 
@@ -422,9 +584,9 @@ def main():
         start_time = time.time()
         
         # 训练一个epoch
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, config['device'], scaler, 
-                                            epoch, checkpoint_path, best_model_path, best_val_loss, 
-                                            patience_counter, scheduler, start_batch, gen)
+        train_loss, train_acc, model, optimizer = train_epoch(model, train_loader, optimizer, config['device'], scaler, 
+                                            epoch, checkpoint_path, best_val_loss, 
+                                            patience_counter, scheduler, start_batch, gen, train_dataset)
         
         # 验证
         val_loss, val_acc, all_preds, all_targets = validate(model, val_loader, criterion, config['device'], scaler, num_tasks)
@@ -474,10 +636,10 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
-                'scaler_state_dict': scaler.state_dict(),
+                # 'scaler_state_dict': scaler.state_dict(),
                 'patience_counter': patience_counter,
                 'best_val_loss': best_val_loss,
-                'batch_idx': 0,
+                'batch_idx': -1,
                 'total_batches': len(train_loader),
                 'gen_state': gen.get_state(),
             }, config['save_dir'] / 'best_model.pth')
@@ -491,10 +653,10 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
-                'scaler_state_dict': scaler.state_dict(),
+                # 'scaler_state_dict': scaler.state_dict(),
                 'patience_counter': patience_counter,
                 'best_val_loss': best_val_loss,
-                'batch_idx': 0,
+                'batch_idx': -1,
                 'total_batches': len(train_loader),
                 'gen_state': gen.get_state(),
             }, config['save_dir'] / f'checkpoint_epoch_{epoch+1}.pth')
