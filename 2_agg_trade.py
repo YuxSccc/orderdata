@@ -11,11 +11,22 @@ def get_decimal_precision(number):
     decimal_value = decimal.Decimal(str(number))
     return -decimal_value.as_tuple().exponent
 
-for file in os.listdir('./rawdata'):
+def has_header(file_path):
+    # 尝试读取文件的第一行并检查列名
+    first_row = pd.read_csv(file_path, nrows=0)
+    return "id" in first_row.columns  # 检查第一列是否是 "id"
+
+path_prefix = '/mnt/e/orderdata/binance'
+for file in os.listdir(f'{path_prefix}/rawdata'):
     filename = file.split('.')[0]
-    if os.path.exists(f'./agg_trade/{filename}.csv'):
+    if os.path.exists(f'{path_prefix}/agg_trade/{filename}.csv'):
         continue
-    df = pd.read_csv(f'./rawdata/{file}')
+
+    if has_header(f'{path_prefix}/rawdata/{file}'):
+        df = pd.read_csv(f'{path_prefix}/rawdata/{file}')
+    else:
+        df = pd.read_csv(f'{path_prefix}/rawdata/{file}', header=None, names=['id', 'price', 'qty', 'quote_qty', 'time', 'is_buyer_maker'])
+
     total_rows = len(df)
     start_time = time.time()
     pre_agg_duration = BTC_pre_agg_duration
@@ -26,7 +37,6 @@ for file in os.listdir('./rawdata'):
     sellSideAggregated = None
     max_qty_precision = 0
     max_quote_qty_precision = 0
-
     for row in df.itertuples():
         if row.Index % 10000 == 0:
             current_time = time.time()
@@ -80,7 +90,7 @@ for file in os.listdir('./rawdata'):
 
     aggregated.sort(key=lambda x: (x['time'], x['id']))
 
-    with open(f'./agg_trade/{filename}.csv', 'w', newline='') as csvfile:
+    with open(f'{path_prefix}/agg_trade/{filename}.csv', 'w', newline='') as csvfile:
         fieldnames = ['id', 'price', 'qty', 'quote_qty', 'time', 'is_buyer_maker', 'count']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 

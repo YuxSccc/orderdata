@@ -80,6 +80,7 @@ class FootprintBar:
         self.tradesCount : int = 0
         self.volumePrecision : int = volumePrecision
         self.pricePrecision : int = pricePrecision
+        self.priceLevelHeight = None
 
     def __eq__(self, other):
         return self.timestamp == other.timestamp and self.duration == other.duration and self.scale == other.scale and self.volumePrecision == other.volumePrecision and self.pricePrecision == other.pricePrecision
@@ -125,7 +126,9 @@ class FootprintBar:
         return f'timestamp: {self.timestamp}, open: {self.open}, high: {self.high}, low: {self.low}, close: {self.close}, volume: {self.volume}, delta: {self.delta}, tradesCount: {self.tradesCount}'
 
     def get_price_level_height(self) -> float:
-        return self.scale * (10 ** -self.pricePrecision)
+        if self.priceLevelHeight is None:
+            self.priceLevelHeight = self.scale * (10 ** -self.pricePrecision)
+        return self.priceLevelHeight
 
     def normalize_price(self, price: float) -> int:
         return round(price // self.get_price_level_height() * self.get_price_level_height(), self.pricePrecision)

@@ -189,10 +189,8 @@ config = {
 }
 
 # config = {
-#     'SpeedBarCalculator': {
+#     'IntradaySessionCalculator': {
 #         'main': {
-#             'check_interval_in_sec': 15,
-#             'trade_count_threshold': 800
 #         }
 #     },
 # }

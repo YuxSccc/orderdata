@@ -55,7 +55,7 @@ class FeatureEmbedding(nn.Module):
 
         if self.use_attention:
             # 使用 TransformerEncoder 作为注意力机制
-            encoder_layer = nn.TransformerEncoderLayer(d_model=self.combined_embedding_dim, nhead=max(2, self.combined_embedding_dim // 16))
+            encoder_layer = nn.TransformerEncoderLayer(d_model=self.combined_embedding_dim, nhead=max(2, self.combined_embedding_dim // 16), batch_first=True)
             self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
         else:
             # 如果不使用注意力机制，可以在这里添加其他处理方式
@@ -115,18 +115,12 @@ class FeatureEmbedding(nn.Module):
         embedded_features = self.positional_encoding(embedded_features)  # [1, max_feature_length, combined_embedding_dim]
 
         if self.use_attention:
-            # 转换形状以适应 Transformer：[seq_len, batch_size, embedding_dim]
-            embedded_features = embedded_features.transpose(0, 1)  # [max_feature_length, 1, combined_embedding_dim]
-
             # Transformer 期望的 src_key_padding_mask 形状为 [batch_size, seq_len]
             # 我们需要传递 mask，填充位置为 True，有效位置为 False
             transformer_mask = mask  # [1, max_feature_length]
 
             # 通过 TransformerEncoder
-            transformer_output = self.transformer_encoder(embedded_features, src_key_padding_mask=transformer_mask)  # [max_feature_length, 1, combined_embedding_dim]
-
-            # 转换回 [batch_size, seq_len, embedding_dim]
-            transformer_output = transformer_output.transpose(0, 1)  # [1, max_feature_length, combined_embedding_dim]
+            transformer_output = self.transformer_encoder(embedded_features, src_key_padding_mask=transformer_mask)  # [1, max_feature_length, combined_embedding_dim]
 
             # 应用掩码到 transformer_output
             masked_output = transformer_output * (~mask.unsqueeze(2)).float()  # 填充位置置零
@@ -187,7 +181,7 @@ class MainModel(nn.Module):
             self.pad_dim = 0
         self.padded_feature_dim = self.time_step_feature_dim + self.pad_dim
         # 时间序列的 Transformer
-        encoder_layer = nn.TransformerEncoderLayer(d_model=self.padded_feature_dim, nhead=32)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=self.padded_feature_dim, nhead=32, batch_first=True)
         self.time_transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
         self.positional_encoding = PositionalEncoding(self.padded_feature_dim, max_len=total_time_steps)
 
@@ -253,21 +247,21 @@ class MainModel(nn.Module):
         sequence_input = self.positional_encoding(sequence_input)  # [batch_size, time_steps, padded_feature_dim]
 
         # 转换形状以适应 Transformer：[seq_len, batch_size, feature_dim]
-        sequence_input = sequence_input.transpose(0, 1)  # [time_steps, batch_size, feature_dim]
+        # sequence_input = sequence_input.transpose(0, 1)  # [time_steps, batch_size, feature_dim]
 
         # 定义序列掩码（可选，如果有填充的时间步）
         # 此处假设所有样本的时间步长度相同，不需要序列掩码
 
         # 通过时间序列 Transformer
-        transformer_output = self.time_transformer(sequence_input)  # [time_steps, batch_size, feature_dim]
+        transformer_output = self.time_transformer(sequence_input)  # [batch_size, time_steps, feature_dim]
 
         # 如果进行了填充，则去掉填充部分
         if self.pad_dim > 0:
-            transformer_output = transformer_output[:, :, :self.time_step_feature_dim]  # 去除填充，形状为 [time_steps, batch_size, time_step_feature_dim]
+            transformer_output = transformer_output[:, :, :self.time_step_feature_dim]  # 去除填充，形状为 [batch_size, time_steps, time_step_feature_dim]
 
 
         # 取最后一个时间步的输出作为特征（也可以采用其他聚合方式）
-        final_output = transformer_output[-1, :, :]  # [batch_size, feature_dim]
+        final_output = transformer_output[:, -1, :]  # [batch_size, feature_dim]
 
         # 通过全连接层，输出预测结果
         output = self.fc_layers(final_output)  # [batch_size, output_dim]
