@@ -339,16 +339,8 @@ def get_feature_embedding_config(features_name: list[str]):
             raise ValueError(f"Feature {feature_name} not found in embedding_config")
         result[name] = embedding_config[feature_name]
 
-    # result["main_PriceLevels"] = {
-    #     'max_feature_length': 15,
-    #     'embedding_dim': 128,
-    #     'param_dim': 16,
-    #     'category_dim': 0,
-    #     'num_categories': 0,
-    #     'use_attention': True
-    # }
-
-    return result
+    sorted_result = dict(sorted(result.items()))
+    return sorted_result
 
 
 flow_feature_list = ['Trend']
