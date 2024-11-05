@@ -191,9 +191,6 @@ def train_epoch(model, train_loader, optimizer, device, scaler,
         if batch_idx < start_batch:
             continue
 
-        if batch_idx >= 2:
-            break
-
         targets = targets.to(device)
         other_features = features['other_features'].to(device, non_blocking=True)
         feature_data = features['feature_data']
@@ -350,8 +347,8 @@ FILE_PREFIX = "./model_feature/"
 
 def main():
     config = {
-        'batch_size': 32,
-        'learning_rate': 0.001,
+        'batch_size': 64,
+        'learning_rate': 0.0015,
         'epochs': 40,
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
         'save_dir': Path('./checkpoints'),
@@ -362,10 +359,6 @@ def main():
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cuda.matmul.allow_tf32 = True
     wandb.init(project="trading_model", config=config)
-
-    begin_skip = 100
-    end_skip = 50
-    seq_len = 100
 
     all_files = []
     for file in os.listdir(FILE_PREFIX):

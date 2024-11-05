@@ -207,7 +207,7 @@ embedding_config = {
         'param_dim': BigTradeCalculator.get_feature_column_name().__len__(),
         'category_dim': 0,
         'num_categories': 0,
-        'use_attention': True
+        'use_attention': False
     },
     DeltaClusterCalculator.get_feature_name(): {
         'max_feature_length': 1,
@@ -255,7 +255,7 @@ embedding_config = {
         'param_dim': LastLowHighPriceCalculator.get_feature_column_name().__len__(),
         'category_dim': 0,
         'num_categories': 0,
-        'use_attention': True
+        'use_attention': False
     },
     NoLiquidityLevelsCalculator.get_feature_name(): {
         'max_feature_length': 1,
@@ -279,7 +279,7 @@ embedding_config = {
         'param_dim': RecentMaxDeltaVolumeCalculator.get_feature_column_name().__len__(),
         'category_dim': 0,
         'num_categories': 0,
-        'use_attention': True
+        'use_attention': False
     },
     SpeedBarCalculator.get_feature_name(): {
         'max_feature_length': 1,
@@ -287,7 +287,7 @@ embedding_config = {
         'param_dim': SpeedBarCalculator.get_feature_column_name().__len__(),
         'category_dim': 0,
         'num_categories': 0,
-        'use_attention': True
+        'use_attention': False
     },
     StopLostOrdersCalculator.get_feature_name(): {
         'max_feature_length': 1,
@@ -345,8 +345,10 @@ def get_feature_embedding_config(features_name: list[str]):
 
 flow_feature_list = ['Trend']
 
-seq_len = 100
+seq_len = 60
 batch_size = 32
+begin_skip = 100
+end_skip = 50
 
 output_flow_parquet_path = './model_feature/output_flow.parquet'
 output_target_parquet_path = './model_feature/output_target.parquet'

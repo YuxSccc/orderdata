@@ -64,7 +64,7 @@ class FeatureEmbedding(nn.Module):
     def forward(self, feature_params, feature_categories=None):
         """
         前向传播。
-
+   
         参数：
         - feature_params (list of list of float): 特征参数列表，形状为 [num_features, param_dim]。
         - feature_categories (list of int, optional): 特征类别索引列表，形状为 [num_features]。
@@ -114,27 +114,60 @@ class FeatureEmbedding(nn.Module):
         # 添加位置编码
         embedded_features = self.positional_encoding(embedded_features)  # [1, max_feature_length, combined_embedding_dim]
 
+        # if self.use_attention:
+        #     # Transformer 期望的 src_key_padding_mask 形状为 [batch_size, seq_len]
+        #     # 我们需要传递 mask，填充位置为 True，有效位置为 False
+        #     transformer_mask = mask  # [1, max_feature_length]
+
+        #     # 通过 TransformerEncoder
+        #     transformer_output = self.transformer_encoder(embedded_features, src_key_padding_mask=transformer_mask)  # [1, max_feature_length, combined_embedding_dim]
+
+        #     # 应用掩码到 transformer_output
+        #     masked_output = transformer_output * (~mask.unsqueeze(2)).float()  # 填充位置置零
+
+        #     # 聚合有效位置的输出（例如，取平均值）
+        #     sum_embeddings = masked_output.sum(dim=1)  # [1, combined_embedding_dim]
+        #     valid_token_count = (~mask).sum(dim=1, keepdim=True).float()  # [1, 1]
+        #     aggregated_feature = sum_embeddings / (valid_token_count + 1e-8)  # [1, combined_embedding_dim]
+        # else:
+        #     # 如果不使用注意力机制，可以对嵌入特征进行其他聚合
+        #     masked_embeddings = embedded_features * (~mask.unsqueeze(2)).float()
+        #     sum_embeddings = masked_embeddings.sum(dim=1)  # [1, combined_embedding_dim]
+        #     valid_token_count = (~mask).sum(dim=1, keepdim=True).float()
+        #     aggregated_feature = sum_embeddings / (valid_token_count + 1e-8)  # [1, combined_embedding_dim]
+
         if self.use_attention:
-            # Transformer 期望的 src_key_padding_mask 形状为 [batch_size, seq_len]
-            # 我们需要传递 mask，填充位置为 True，有效位置为 False
-            transformer_mask = mask  # [1, max_feature_length]
-
-            # 通过 TransformerEncoder
-            transformer_output = self.transformer_encoder(embedded_features, src_key_padding_mask=transformer_mask)  # [1, max_feature_length, combined_embedding_dim]
-
-            # 应用掩码到 transformer_output
-            masked_output = transformer_output * (~mask.unsqueeze(2)).float()  # 填充位置置零
-
-            # 聚合有效位置的输出（例如，取平均值）
-            sum_embeddings = masked_output.sum(dim=1)  # [1, combined_embedding_dim]
-            valid_token_count = (~mask).sum(dim=1, keepdim=True).float()  # [1, 1]
-            aggregated_feature = sum_embeddings / (valid_token_count + 1e-8)  # [1, combined_embedding_dim]
+            transformer_mask = mask
+            transformer_output = self.transformer_encoder(
+                embedded_features, 
+                src_key_padding_mask=transformer_mask
+            )  # [1, max_feature_length, combined_embedding_dim]
+            
+            # 应用掩码并聚合
+            feature_weights = F.softmax(
+                transformer_output.mean(dim=-1), 
+                dim=-1
+            ) * (~mask).float()  # [1, max_feature_length]
+            
+            # 加权聚合
+            aggregated_feature = torch.bmm(
+                feature_weights.unsqueeze(1),
+                transformer_output
+            ).squeeze(1)  # [1, combined_embedding_dim]
         else:
-            # 如果不使用注意力机制，可以对嵌入特征进行其他聚合
-            masked_embeddings = embedded_features * (~mask.unsqueeze(2)).float()
-            sum_embeddings = masked_embeddings.sum(dim=1)  # [1, combined_embedding_dim]
-            valid_token_count = (~mask).sum(dim=1, keepdim=True).float()
-            aggregated_feature = sum_embeddings / (valid_token_count + 1e-8)  # [1, combined_embedding_dim]
+            # 使用简单的注意力机制
+            attention_weights = F.softmax(
+                self.param_embedding(
+                    torch.ones(1, self.max_feature_length, self.param_dim, device=device)
+                ).mean(dim=-1),
+                dim=-1
+            ) * (~mask).float()  # [1, max_feature_length]
+            
+            # 加权聚合
+            aggregated_feature = torch.bmm(
+                attention_weights.unsqueeze(1),
+                embedded_features
+            ).squeeze(1)  # [1, combined_embedding_dim]
 
         return aggregated_feature  # [1, combined_embedding_dim]
 
@@ -181,7 +214,7 @@ class MainModel(nn.Module):
             self.pad_dim = 0
         self.padded_feature_dim = self.time_step_feature_dim + self.pad_dim
         # 时间序列的 Transformer
-        encoder_layer = nn.TransformerEncoderLayer(d_model=self.padded_feature_dim, nhead=32, batch_first=True)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=self.padded_feature_dim, nhead=8, batch_first=True)
         self.time_transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
         self.positional_encoding = PositionalEncoding(self.padded_feature_dim, max_len=total_time_steps)
 
