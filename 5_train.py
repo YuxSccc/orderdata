@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 import pandas as pd
 import numpy as np
 from model_common import MainModel
@@ -13,15 +13,17 @@ from config import *
 import torch.nn.functional as F
 import os
 from torchmetrics import AUROC, F1Score
-import cProfile
-import pstats
+from sklearn.metrics import precision_score, recall_score, f1_score
+import bisect
+import sys        
+import inspect
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('training.log'),
-        logging.StreamHandler()
+        logging.StreamHandler(sys.stderr)
     ]
 )
 
@@ -59,11 +61,19 @@ class TradingDataset(Dataset):
         self.total_sequences = total_sequences
         self.feature_names = set()
 
+        self.start_indices = [start_idx for (_, start_idx, _) in self.file_sequences]
+
         # 初始化特征名称（只需要读取一个文件）
         first_file = file_list[0]
         event_df = self.read_parquet(f"{first_file}_event.parquet")
         self.feature_names.update(set(col.rsplit('_', 1)[0] for col in event_df.columns))
     
+        self.last_file_idx = None
+        self.last_file_info = None  # (file_path, start_idx, num_sequences)
+
+        self.load_times = []  # 记录加载时间
+        self.access_count = 0  # 记录访问次数
+
     def get_number_feature_dim(self):
         number_df = self.read_parquet(f"{self.file_list[0]}_number.parquet")
         return number_df.shape[1]
@@ -95,17 +105,36 @@ class TradingDataset(Dataset):
         return self.total_sequences
     
     def __getitem__(self, idx):
-        file_path = None
-        local_idx = None
-        for file, start_idx, num_sequences in self.file_sequences:
-            if idx < start_idx + num_sequences:
-                file_path = file
-                local_idx = idx - start_idx
-                break
+        start_time = time.time()
+        self.access_count += 1
         
-        if file_path is None:
+        # 检查索引范围
+        if idx < 0 or idx >= self.total_sequences:
             raise IndexError("Index out of range")
-        
+
+        if self.last_file_info is not None:
+            last_file_idx, (file_path, start_idx, num_sequences) = self.last_file_idx, self.last_file_info
+            if start_idx <= idx < start_idx + num_sequences:
+                # 缓存命中，直接使用
+                local_idx = idx - start_idx
+            else:
+                # 缓存未命中，需要更新缓存
+                file_idx = bisect.bisect_right(self.start_indices, idx) - 1
+                file_path, start_idx, num_sequences = self.file_sequences[file_idx]
+                local_idx = idx - start_idx
+                # 更新缓存
+                self.last_file_idx = file_idx
+                self.last_file_info = (file_path, start_idx, num_sequences)
+        else:
+            # 缓存为空，首次访问，进行二分查找
+            file_idx = bisect.bisect_right(self.start_indices, idx) - 1
+            file_path, start_idx, num_sequences = self.file_sequences[file_idx]
+            local_idx = idx - start_idx
+            # 更新缓存
+            self.last_file_idx = file_idx
+            self.last_file_info = (file_path, start_idx, num_sequences)
+
+        # 计算开始和结束行号
         start_row = self.begin_skip + local_idx
         end_row = start_row + self.seq_len
         
@@ -171,75 +200,237 @@ class TradingDataset(Dataset):
         target_df = self.read_parquet(f"{file_path}_target.parquet")
         target = target_df.iloc[local_idx + self.seq_len - 1].values
 
+        # 记录加载时间
+        load_time = time.time() - start_time
+        self.load_times.append(load_time)
+        
         return {
             'other_features': torch.FloatTensor(other_features),
             'feature_data': feature_data
         }, torch.LongTensor(target)
 
+    def get_stats(self):
+        """获取数据集访问统计信息"""
+        if not self.load_times:
+            return "No data loaded yet"
+        
+        avg_time = np.mean(self.load_times)
+        max_time = np.max(self.load_times)
+        min_time = np.min(self.load_times)
+        items_per_sec = 1.0 / avg_time
+        
+        return {
+            "avg_load_time": avg_time,
+            "max_load_time": max_time,
+            "min_load_time": min_time,
+            "items_per_sec": items_per_sec,
+            "total_accesses": self.access_count
+        }
+
+class OffsetSampler(Sampler):
+    def __init__(self, data_source, start_idx=0):
+        self.data_source = data_source
+        self.start_idx = start_idx
+        
+    def __iter__(self):
+        return iter(range(self.start_idx, len(self.data_source)))
+    
+    def __len__(self):
+        return len(self.data_source) - self.start_idx
+
+    def reset(self):
+        self.current_start_idx = 0
+
+# 在创建 DataLoader 时使用
+def create_data_loader(dataset, batch_size, start_batch=0):
+    start_idx = start_batch * batch_size
+    sampler = OffsetSampler(dataset, start_idx)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        collate_fn=custom_collate_fn,
+        num_workers=4,
+        pin_memory=True
+    ), sampler
+
+is_profiling = False
+
+def check_nan_inf(model, optimizer):
+    flag = False
+    for name, param in model.named_parameters():
+        if torch.isnan(param).any() or torch.isinf(param).any():
+            print(f"参数 {name} 中存在 NaN 或 Inf")
+            flag = True
+    for param_group in optimizer.param_groups:
+        for key, value in param_group.items():
+            if isinstance(value, torch.Tensor):
+                if torch.isnan(value).any() or torch.isinf(value).any():
+                    print(f"优化器参数 {key} 中存在 NaN 或 Inf")
+                    flag = True
+
+    for i, state in enumerate(optimizer.state.values()):
+        for key, value in state.items():
+            if isinstance(value, torch.Tensor):
+                if torch.isnan(value).any() or torch.isinf(value).any():
+                    print(f"优化器状态第 {i} 个参数的 {key} 中存在 NaN 或 Inf")
+                    flag = True
+
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                print(f"梯度 {name} 中存在 NaN 或 Inf")
+                flag = True
+    if flag:
+        stack = inspect.stack()
+        previous_frame = stack[1]  # 上一层
+        module = inspect.getmodule(previous_frame[0])
+        filename = previous_frame.filename
+        line_number = previous_frame.lineno
+        function_name = previous_frame.function
+        print(f"Called from {function_name} in {filename} at line {line_number}")
+    return flag
+
 def train_epoch(model, train_loader, optimizer, device, scaler, 
-                epoch, checkpoint_path, best_val_loss, patience_counter, scheduler, start_batch):
+                epoch, checkpoint_path, best_val_loss, patience_counter, scheduler, start_batch, batch_size):
     model.train()
     total_loss = 0
     correct = torch.zeros(4).to(device)
     total = 0
-    
     last_print_time = time.time()
     last_checkpoint_time = time.time()
     checkpoint_interval = 300
 
-    for batch_idx, (features, targets) in enumerate(train_loader):
-        if batch_idx < start_batch:
-            continue
+    batch_start_time = time.time()
+    moving_avg_time = 0
+    alpha = 0.98  # 用于移动平均的平滑系数
 
+    # 创建用于累计每个任务的 TP、FP、FN
+    task_metrics = {
+        'TP': [0, 0, 0, 0],
+        'FP': [0, 0, 0, 0],
+        'FN': [0, 0, 0, 0],
+        'TN': [0, 0, 0, 0]
+    }
+
+    profile_count = 0
+    sample_count = 0
+    for batch_idx, (features, targets) in enumerate(train_loader):
+        print(f"Batch {start_batch + batch_idx}/{len(train_loader)}")
+        start_batch += 1
         targets = targets.to(device)
         other_features = features['other_features'].to(device, non_blocking=True)
         feature_data = features['feature_data']
-        
-        optimizer.zero_grad(set_to_none=True)
+        flag = False
+        optimizer.zero_grad()
+        pos_weights = [4.0, 4.0, 4.0, 4.0]
+        if is_profiling:
+            from torch.profiler import profile, record_function, ProfilerActivity
+            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, with_stack=True) as prof:
+                with torch.amp.autocast('cuda', dtype=torch.float16):
+                    outputs = model(other_features, feature_data)
+                    loss = calculate_multi_task_loss(outputs, targets, pos_weights=pos_weights)
+                    profile_count += 1
+            if profile_count == 1:
+                prof.export_chrome_trace("small_trace.json")
+                print(prof.key_averages().table(sort_by="self_cpu_time_total"))
+                exit(0)
+        else:
+            with torch.amp.autocast('cuda'):
+                outputs = model(other_features, feature_data)
+                loss = calculate_multi_task_loss(outputs, targets, pos_weights=pos_weights)
 
-        with torch.amp.autocast('cuda'):
-            outputs = model(other_features, feature_data)
-            loss = calculate_multi_task_loss(outputs, targets)
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"Loss is NaN or Inf, outputs: {outputs}, targets: {targets}")
+            exit(0)
+
+        sample_count += 1
         wandb.log({"train_loss": loss})
-        
+
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        
+
+        torch.cuda.synchronize()
+
         total_loss += loss.item()
         predictions = (torch.sigmoid(outputs) > 0.5).float()
+
+        # 更新每个任务的 TP、FP、FN、TN
         for task_idx in range(4):
-            correct[task_idx] += (predictions[:, task_idx] == targets[:, task_idx]).sum().item()
-        total += targets.size(0)
-        
+            preds = predictions[:, task_idx]
+            trues = targets[:, task_idx]
+
+            task_metrics['TP'][task_idx] += ((preds == 1) & (trues == 1)).sum().item()
+            task_metrics['FP'][task_idx] += ((preds == 1) & (trues == 0)).sum().item()
+            task_metrics['FN'][task_idx] += ((preds == 0) & (trues == 1)).sum().item()
+            task_metrics['TN'][task_idx] += ((preds == 0) & (trues == 0)).sum().item()
+        # 计算并更新批处理时间
+        batch_time = time.time() - batch_start_time
+        moving_avg_time = alpha * batch_time + (1 - alpha) * moving_avg_time if batch_idx > 0 else batch_time
+        iter_per_sec = 1 / moving_avg_time if moving_avg_time > 0 else 0
+        # 打印简要的训练信息
+        print(f'\rBatch: {start_batch + batch_idx}/{len(train_loader)}, '
+            f'Loss: {loss.item():.4f}, '
+            f'Speed: {iter_per_sec:.2f} iter/s, '
+            f'ItemSpeed: {iter_per_sec * batch_size:.2f} items/s ', end='', flush=True)
+
         current_time = time.time()
+        batch_start_time = current_time
+        # 每隔一定时间或批次，打印和记录详细的性能指标
+        if batch_idx % 200 == 0 or current_time - last_print_time >= 300:
+            # 计算每个任务的指标
+            metrics_str = ''
+            for task_idx in range(4):
+                TP = task_metrics['TP'][task_idx]
+                FP = task_metrics['FP'][task_idx]
+                FN = task_metrics['FN'][task_idx]
+                TN = task_metrics['TN'][task_idx]
 
-        if batch_idx % 100 == 0 or current_time - last_print_time >= 120:
-            acc_str = ' '.join([f'Task{i+1}: {100.*c/total:.1f}%' for i, c in enumerate(correct)])
-            logging.info(f'Batch: {batch_idx}/{len(train_loader)}, Loss: {loss.item():.4f}, Acc: {acc_str}')
-            last_print_time = time.time()
+                precision = TP / (TP + FP + 1e-8)
+                recall = TP / (TP + FN + 1e-8)
+                f1 = 2 * precision * recall / (precision + recall + 1e-8)
+                accuracy = (TP + TN) / (TP + FP + FN + TN + 1e-8)
 
+                metrics_str += (f'Task{task_idx+1} - Acc: {accuracy*100:.1f}%, '
+                                f'Prec: {precision*100:.1f}%, '
+                                f'Recall: {recall*100:.1f}%, '
+                                f'F1: {f1*100:.1f}%\n')
+
+            avg_loss = total_loss / sample_count
+            logging.info(f'\nBatch: {start_batch + batch_idx}/{len(train_loader)}, Avg Loss: {avg_loss:.4f}\n{metrics_str}')
+
+            last_print_time = current_time
+
+            # 重置统计变量（可选）
+            task_metrics = {
+                'TP': [0, 0, 0, 0],
+                'FP': [0, 0, 0, 0],
+                'FN': [0, 0, 0, 0],
+                'TN': [0, 0, 0, 0]
+            }
+            total_loss = 0.0
+            sample_count = 0
         if current_time - last_checkpoint_time >= checkpoint_interval:
             batch_progress = batch_idx / len(train_loader)
             logging.info(f"Saving checkpoint at epoch {epoch}, batch progress: {batch_progress:.2%}")
 
             torch.save({
                 'epoch': epoch,
-                'batch_idx': batch_idx,
+                'batch_idx': batch_idx + start_batch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'scaler_state_dict': scaler.state_dict(),
                 'patience_counter': patience_counter,
-                'best_val_loss': best_val_loss,
+                'best_val_loss': min(best_val_loss, loss.item()),
                 'total_batches': len(train_loader),
             }, checkpoint_path)
             
             logging.info(f"Saving checkpoint at epoch {epoch}, batch progress: {batch_progress:.2%}")
             last_checkpoint_time = current_time
-
     task_accuracies = [100. * c / total for c in correct]
-    return total_loss / len(train_loader), task_accuracies
+    return 0, task_accuracies
 
 def validate(model, val_loader, device, num_tasks):
     model.eval()
@@ -256,6 +447,8 @@ def validate(model, val_loader, device, num_tasks):
                 
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
                 outputs = model(other_features, feature_data)
+                print(f"Outputs sample: {outputs[:5]}")
+                print(f"Targets sample: {targets[:5]}")
                 loss = calculate_multi_task_loss(outputs, targets)
                 for i in range(num_tasks):
                     all_preds[i].append(torch.sigmoid(outputs[:, i]))
@@ -270,7 +463,7 @@ def validate(model, val_loader, device, num_tasks):
     task_accuracies = [100. * c / total for c in correct]
     return total_loss / len(val_loader), task_accuracies, all_preds, all_targets
 
-def calculate_multi_task_loss(outputs, targets, weights=None):
+def calculate_multi_task_loss(outputs, targets, pos_weights=None, weights=None):
     """
     计算多任务二分类损失
     
@@ -284,9 +477,14 @@ def calculate_multi_task_loss(outputs, targets, weights=None):
     
     total_loss = 0
     for task_idx in range(4):
+        if pos_weights is not None:
+            pos_weight = torch.tensor(pos_weights[task_idx], device=outputs.device)
+        else:
+            pos_weight = None
         task_loss = F.binary_cross_entropy_with_logits(
             outputs[:, task_idx],
             targets[:, task_idx].float(),
+            pos_weight=pos_weight,
             reduction='mean'
         )
         total_loss += weights[task_idx] * task_loss
@@ -347,8 +545,9 @@ FILE_PREFIX = "./model_feature/"
 
 def main():
     config = {
-        'batch_size': 64,
-        'learning_rate': 0.0015,
+        'batch_size': 128,
+        'learning_rate': 0.001,
+        'weight_decay': 0.01,
         'epochs': 40,
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
         'save_dir': Path('./checkpoints'),
@@ -396,7 +595,7 @@ def main():
         output_dim=4
     ).to(config['device'])
 
-    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
+    optimizer = optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
     if checkpoint_path.exists():
         logging.info(f"Loading checkpoint from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, weights_only=False)
@@ -418,8 +617,10 @@ def main():
         start_epoch = 0
         start_batch = 0
 
-    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], collate_fn=custom_collate_fn, shuffle=False, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], collate_fn=custom_collate_fn, num_workers=4)
+    # start_batch = 630
+
+    train_loader, sampler = create_data_loader(train_dataset, config['batch_size'], start_batch)
+    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], collate_fn=custom_collate_fn, num_workers=4, pin_memory=True)
 
     num_tasks = 4
     auc_metrics = [AUROC(task="binary").to(config['device']) for _ in range(num_tasks)]
@@ -430,7 +631,9 @@ def main():
         
         train_loss, train_acc = train_epoch(model, train_loader, optimizer, config['device'], scaler, 
                                             epoch, checkpoint_path, best_val_loss, 
-                                            patience_counter, scheduler, start_batch)
+                                            patience_counter, scheduler, start_batch, config['batch_size'])
+        sampler.reset()
+        start_batch = 0
         val_loss, val_acc, all_preds, all_targets = validate(model, val_loader, config['device'], num_tasks)
         scheduler.step(val_loss)
 
@@ -450,19 +653,19 @@ def main():
         val_loss /= len(val_loader)
 
         logging.info(f'Epoch: {epoch+1}/{config["epochs"]}')
-        logging.info(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc[0]:.2f}%, {train_acc[1]:.2f}%, {train_acc[2]:.2f}%, {train_acc[3]:.2f}%')
+        # logging.info(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc[0]:.2f}%, {train_acc[1]:.2f}%, {train_acc[2]:.2f}%, {train_acc[3]:.2f}%')
         logging.info(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc[0]:.2f}%, {val_acc[1]:.2f}%, {val_acc[2]:.2f}%, {val_acc[3]:.2f}% val_auc: {avg_val_auc}, val_f1: {avg_val_f1}')
         logging.info(f'Time: {epoch_time:.2f}s')
     
-        wandb.log({
-            'train_loss': train_loss,
-            'train_acc': train_acc,
-            'val_loss': val_loss,
-            'val_acc': val_acc,
-            'val_auc': avg_val_auc,
-            'val_f1': avg_val_f1,
-            'learning_rate': optimizer.param_groups[0]['lr']
-        })
+        # wandb.log({
+        #     'train_loss': train_loss,
+        #     'train_acc': train_acc,
+        #     'val_loss': val_loss,
+        #     'val_acc': val_acc,
+        #     'val_auc': avg_val_auc,
+        #     'val_f1': avg_val_f1,
+        #     'learning_rate': optimizer.param_groups[0]['lr']
+        # })
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -504,7 +707,4 @@ def main():
         logging.info("Removed checkpoint after successful training completion")
 
 if __name__ == '__main__':
-    # cProfile.run('main()', 'output.prof')
     main()
-    # p = pstats.Stats('output.prof')
-    # p.sort_stats('cumtime').print_stats(100)

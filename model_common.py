@@ -61,115 +61,100 @@ class FeatureEmbedding(nn.Module):
             # 如果不使用注意力机制，可以在这里添加其他处理方式
             pass
 
-    def forward(self, feature_params, feature_categories=None):
+    def forward(self, batch_feature_params, batch_feature_categories=None):
         """
-        前向传播。
-   
-        参数：
-        - feature_params (list of list of float): 特征参数列表，形状为 [num_features, param_dim]。
-        - feature_categories (list of int, optional): 特征类别索引列表，形状为 [num_features]。
-          如果 num_categories == 1，可以不提供该参数。
-
-        返回：
-        - aggregated_feature (torch.Tensor): 聚合后的特征向量，形状为 [1, embedding_dim]。
+        Args:
+            batch_feature_params: list[list[list[float]]], shape: [batch_size, num_features, param_dim]
+            batch_feature_categories: list[list[int]], shape: [batch_size, num_features] (optional)
         """
         device = next(self.parameters()).device
-
-        num_features = len(feature_params)
-
-        if num_features == 0:
-            # 如果没有特征，返回全零的向量
-            aggregated_feature = torch.zeros(1, self.combined_embedding_dim, device=device)
-            return aggregated_feature
-
-        # 将特征参数转换为张量
-        feature_params_tensor = torch.tensor(np.array(feature_params), dtype=torch.float32, device=device)  # [num_features, param_dim]
-        param_embeds = self.param_embedding(feature_params_tensor)  # [num_features, embedding_dim]
-
-        if self.use_category_embedding:
-            assert feature_categories is not None, "feature_categories must be provided when num_categories > 1"
-            feature_categories_tensor = torch.tensor(feature_categories, dtype=torch.long, device=device)  # [num_features]
-            category_embeds = self.category_embedding(feature_categories_tensor)  # [num_features, category_dim]
-            embedded_features = torch.cat([category_embeds, param_embeds], dim=1)  # [num_features, combined_embedding_dim]
+        batch_size = len(batch_feature_params)
+        
+        # 找到批次中最大的特征数量
+        max_num_features = self.max_feature_length
+        
+        # 将所有特征参数和类别索引展开为一维列表
+        all_params = []
+        all_categories = []
+        all_masks = []
+        for features in batch_feature_params:
+            num_features = len(features)
+            all_params.extend(features)
+            all_masks.extend([1] * num_features)
+        if batch_feature_categories is not None:
+            for categories in batch_feature_categories:
+                all_categories.extend(categories)
+        
+        total_num_features = len(all_params)
+        param_dim = self.param_dim
+        
+        # 将所有特征参数一次性转换为张量
+        all_params_tensor = torch.tensor(
+            np.array(all_params), 
+            dtype=torch.float32, 
+            device=device
+        )  # [total_num_features, param_dim]
+        
+        # 进行参数嵌入
+        param_embeds = self.param_embedding(all_params_tensor) if len(all_params) > 0 else torch.zeros(0, self.embedding_dim, device=device)  # [total_num_features, embedding_dim]
+        
+        if self.use_category_embedding and batch_feature_categories is not None:
+            if len(all_categories) > 0:
+                all_categories_tensor = torch.tensor(
+                    all_categories,
+                    dtype=torch.long,
+                    device=device
+                )  # [total_num_features]
+            else:
+                all_categories_tensor = torch.zeros(0, dtype=torch.long, device=device)
+            category_embeds = self.category_embedding(all_categories_tensor)  # [total_num_features, category_dim]
+            all_embeds = torch.cat([param_embeds, category_embeds], dim=1)  # [total_num_features, combined_embedding_dim]
         else:
-            embedded_features = param_embeds  # [num_features, combined_embedding_dim]
+            all_embeds = param_embeds  # [total_num_features, combined_embedding_dim]
+        
+        # 将嵌入向量重新组织回批次和特征维度
 
-        # 创建掩码：填充位置为 True，有效数据为 False
-        mask = torch.ones(self.max_feature_length, dtype=torch.bool, device=device)  # 全部初始化为填充
-        mask[:num_features] = False  # 有效位置设为 False
+        all_embeds = all_embeds.to('cpu')
+        embedded_features = torch.zeros(batch_size, max_num_features, self.combined_embedding_dim, device='cpu')
+        masks = torch.zeros(batch_size, max_num_features, dtype=torch.bool, device='cpu')
 
-        # 填充或截断 embedded_features 到 max_feature_length
-        if num_features < self.max_feature_length:
-            padding_length = self.max_feature_length - num_features
-            padding_embeds = torch.zeros(padding_length, self.combined_embedding_dim, device=device)
-            embedded_features = torch.cat([embedded_features, padding_embeds], dim=0)  # [max_feature_length, embedding_dim]
-        else:
-            embedded_features = embedded_features[:self.max_feature_length, :]  # [max_feature_length, embedding_dim]
-            mask = mask[:self.max_feature_length]
-
-        # 添加批次维度
-        embedded_features = embedded_features.unsqueeze(0)  # [1, max_feature_length, combined_embedding_dim]
-        mask = mask.unsqueeze(0)  # [1, max_feature_length]
-
-        # 添加位置编码
-        embedded_features = self.positional_encoding(embedded_features)  # [1, max_feature_length, combined_embedding_dim]
-
-        # if self.use_attention:
-        #     # Transformer 期望的 src_key_padding_mask 形状为 [batch_size, seq_len]
-        #     # 我们需要传递 mask，填充位置为 True，有效位置为 False
-        #     transformer_mask = mask  # [1, max_feature_length]
-
-        #     # 通过 TransformerEncoder
-        #     transformer_output = self.transformer_encoder(embedded_features, src_key_padding_mask=transformer_mask)  # [1, max_feature_length, combined_embedding_dim]
-
-        #     # 应用掩码到 transformer_output
-        #     masked_output = transformer_output * (~mask.unsqueeze(2)).float()  # 填充位置置零
-
-        #     # 聚合有效位置的输出（例如，取平均值）
-        #     sum_embeddings = masked_output.sum(dim=1)  # [1, combined_embedding_dim]
-        #     valid_token_count = (~mask).sum(dim=1, keepdim=True).float()  # [1, 1]
-        #     aggregated_feature = sum_embeddings / (valid_token_count + 1e-8)  # [1, combined_embedding_dim]
-        # else:
-        #     # 如果不使用注意力机制，可以对嵌入特征进行其他聚合
-        #     masked_embeddings = embedded_features * (~mask.unsqueeze(2)).float()
-        #     sum_embeddings = masked_embeddings.sum(dim=1)  # [1, combined_embedding_dim]
-        #     valid_token_count = (~mask).sum(dim=1, keepdim=True).float()
-        #     aggregated_feature = sum_embeddings / (valid_token_count + 1e-8)  # [1, combined_embedding_dim]
-
+        index = 0
+        for b in range(batch_size):
+            num_features = len(batch_feature_params[b])
+            padding_length = min(max_num_features, num_features)
+            if num_features > 0:
+                embedded_features[b, :padding_length] = all_embeds[index:index+padding_length]
+                masks[b, :padding_length] = True
+                index += num_features
+        
+        embedded_features = embedded_features.to(device)
+        masks = masks.to(device)
+        embedded_features = self.positional_encoding(embedded_features)
         if self.use_attention:
-            transformer_mask = mask
-            transformer_output = self.transformer_encoder(
-                embedded_features, 
-                src_key_padding_mask=transformer_mask
-            )  # [1, max_feature_length, combined_embedding_dim]
-            
-            # 应用掩码并聚合
+                # 批量处理注意力机制
+            with torch.autocast("cuda", enabled=False):
+                transformer_output = self.transformer_encoder(
+                    embedded_features,
+                    src_key_padding_mask=masks
+                )  # [batch_size, max_feature_length, combined_embedding_dim]
+            # 批量计算注意力权重
             feature_weights = F.softmax(
-                transformer_output.mean(dim=-1), 
+                transformer_output.mean(dim=-1),
                 dim=-1
-            ) * (~mask).float()  # [1, max_feature_length]
-            
-            # 加权聚合
-            aggregated_feature = torch.bmm(
-                feature_weights.unsqueeze(1),
-                transformer_output
-            ).squeeze(1)  # [1, combined_embedding_dim]
+            ) * (~masks).float()  # [batch_size, max_feature_length]
+            # 批量加权聚合
+            with torch.autocast("cuda", enabled=False):
+                aggregated_features = torch.bmm(
+                    feature_weights.unsqueeze(1),
+                    transformer_output
+                ).squeeze(1)  # [batch_size, combined_embedding_dim]
         else:
-            # 使用简单的注意力机制
-            attention_weights = F.softmax(
-                self.param_embedding(
-                    torch.ones(1, self.max_feature_length, self.param_dim, device=device)
-                ).mean(dim=-1),
-                dim=-1
-            ) * (~mask).float()  # [1, max_feature_length]
-            
-            # 加权聚合
-            aggregated_feature = torch.bmm(
-                attention_weights.unsqueeze(1),
-                embedded_features
-            ).squeeze(1)  # [1, combined_embedding_dim]
-
-        return aggregated_feature  # [1, combined_embedding_dim]
+            # 简单的批量平均
+            masked_features = embedded_features * (~masks).float().unsqueeze(-1)
+            aggregated_features = masked_features.sum(dim=1) / \
+                (~masks).float().sum(dim=1, keepdim=True).clamp(min=1e-8)
+        
+        return aggregated_features  # [batch_size, combined_embedding_dim]
 
 
 class MainModel(nn.Module):
@@ -214,7 +199,7 @@ class MainModel(nn.Module):
             self.pad_dim = 0
         self.padded_feature_dim = self.time_step_feature_dim + self.pad_dim
         # 时间序列的 Transformer
-        encoder_layer = nn.TransformerEncoderLayer(d_model=self.padded_feature_dim, nhead=8, batch_first=True)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=self.padded_feature_dim, nhead=16, batch_first=True)
         self.time_transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
         self.positional_encoding = PositionalEncoding(self.padded_feature_dim, max_len=total_time_steps)
 
@@ -248,22 +233,21 @@ class MainModel(nn.Module):
             feature_data_dict = feature_data_dict_list[t]
 
             embedded_feature_list = []
-
             for feature_name, feature_embedding in self.feature_embeddings.items():
                 feature_params_batch, feature_categories_batch = feature_data_dict.get(feature_name, ({}, {}))
-
-                # 处理批次中的每个样本
-                aggregated_features = []
-
+                # 准备批量数据
+                batch_params = []
+                batch_categories = []
                 for i in range(batch_size):
-                    feature_params = feature_params_batch[i] if i in feature_params_batch else []
-                    feature_categories = feature_categories_batch[i] if i in feature_categories_batch else None
-
-                    aggregated_feature = feature_embedding(feature_params, feature_categories)  # [1, embedding_dim]
-                    aggregated_features.append(aggregated_feature)
-
-                # 堆叠聚合特征
-                aggregated_features = torch.cat(aggregated_features, dim=0)  # [batch_size, embedding_dim]
+                    batch_params.append(feature_params_batch.get(i, []))
+                    if feature_categories_batch:
+                        batch_categories.append(feature_categories_batch.get(i, []))
+                
+                # 批量处理特征嵌入
+                if feature_categories_batch:
+                    aggregated_features = feature_embedding(batch_params, batch_categories)
+                else:
+                    aggregated_features = feature_embedding(batch_params)
                 embedded_feature_list.append(aggregated_features)
 
             # 拼接其他特征和嵌入特征，得到当前时间步的表示
@@ -272,31 +256,27 @@ class MainModel(nn.Module):
                 time_step_input = F.pad(time_step_input, (0, self.pad_dim))  # 填充到 [batch_size, time_steps, padded_feature_dim]
 
             time_step_embeddings.append(time_step_input.unsqueeze(1))  # [batch_size, 1, padded_feature_dim]
+            # 将所有时间步的表示拼接成序列
+            sequence_input = torch.cat(time_step_embeddings, dim=1)  # [batch_size, time_steps, padded_feature_dim]
 
-        # 将所有时间步的表示拼接成序列
-        sequence_input = torch.cat(time_step_embeddings, dim=1)  # [batch_size, time_steps, padded_feature_dim]
+            # 添加位置编码
+            sequence_input = self.positional_encoding(sequence_input)  # [batch_size, time_steps, padded_feature_dim]
+            # 转换形状以适应 Transformer：[seq_len, batch_size, feature_dim]
+            # sequence_input = sequence_input.transpose(0, 1)  # [time_steps, batch_size, feature_dim]
 
-        # 添加位置编码
-        sequence_input = self.positional_encoding(sequence_input)  # [batch_size, time_steps, padded_feature_dim]
-
-        # 转换形状以适应 Transformer：[seq_len, batch_size, feature_dim]
-        # sequence_input = sequence_input.transpose(0, 1)  # [time_steps, batch_size, feature_dim]
-
-        # 定义序列掩码（可选，如果有填充的时间步）
-        # 此处假设所有样本的时间步长度相同，不需要序列掩码
-
-        # 通过时间序列 Transformer
-        transformer_output = self.time_transformer(sequence_input)  # [batch_size, time_steps, feature_dim]
-
-        # 如果进行了填充，则去掉填充部分
-        if self.pad_dim > 0:
-            transformer_output = transformer_output[:, :, :self.time_step_feature_dim]  # 去除填充，形状为 [batch_size, time_steps, time_step_feature_dim]
+            # 定义序列掩码（可选，如果有填充的时间步）
+            # 此处假设所有样本的时间步长度相同，不需要序列掩码
+            # 通过时间序列 Transformer
+            with torch.autocast("cuda", enabled=False):
+                transformer_output = self.time_transformer(sequence_input)  # [batch_size, time_steps, feature_dim]
+            # 如果进行了填充，则去掉填充部分
+            if self.pad_dim > 0:
+                transformer_output = transformer_output[:, :, :self.time_step_feature_dim]  # 去除填充，形状为 [batch_size, time_steps, time_step_feature_dim]
 
 
-        # 取最后一个时间步的输出作为特征（也可以采用其他聚合方式）
-        final_output = transformer_output[:, -1, :]  # [batch_size, feature_dim]
-
-        # 通过全连接层，输出预测结果
-        output = self.fc_layers(final_output)  # [batch_size, output_dim]
-
-        return output
+            # 取最后一个时间步的输出作为特征（也可以采用其他聚合方式）
+            final_output = transformer_output[:, -1, :]  # [batch_size, feature_dim]
+            # 通过全连接层，输出预测结果
+            with torch.autocast("cuda", enabled=False):
+                output = self.fc_layers(final_output)  # [batch_size, output_dim]
+            return output
